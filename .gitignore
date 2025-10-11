@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+.python-version
+
+# Environment variables
+.env
+.env.local
+
+# Data files
+data/vector_stores/
+data/raw/
+data/processed/
+
+# VS Code
+.vscode/
+
+# System
+.DS_Store
+Thumbs.db

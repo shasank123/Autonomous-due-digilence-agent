@@ -1,0 +1,6 @@
+{
+    "python.defaultInterpreterPath": "C:\\\\python_environments\\\\due_diligence\\\\Scripts\\\\python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.analysis.extraPaths": ["./src"],
+    "python.analysis.typeCheckingMode": "basic"
+}

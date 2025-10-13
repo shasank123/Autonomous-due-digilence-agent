@@ -2,123 +2,78 @@ import json
 import requests
 import time
 from typing import Dict,List,Optional
+import logging
+from company_resolver import CompanyResolver
 
 class SECDataCollector:
     """
-    REAL SEC API integration - fetches actual company financial data
+    Production-grade SEC data collector with error handling & rate limiting
     """
     def __init__(self, email: str):
         self.email = email
         self.base_url = "https://data.sec.gov/api/xbrl"
         self.headers = {
-            'user_agent': f'{email}',
+            'user_agent': email,
             'Accept-Encoding': 'gzip, deflate'
-        }
-    
-            
-        # real CIK mappings for major companies
-        ticker_to_cik = {
-            "AAPL": "0000320193",    # Apple
-            "MSFT": "0000789019",    # Microsoft  
-            "TSLA": "0001318605",    # Tesla
-            "GOOGL": "0001652044",   # Alphabet (Google)
-            "AMZN": "0001018724",    # Amazon
-            "META": "0001326801",    # Meta (Facebook)
-            "NFLX": "0001065280",    # Netflix
-            "NVDA": "0001045810",    # NVIDIA
-            "JPM": "0000019617",     # JPMorgan Chase
-            "JNJ": "0000200406"      # Johnson & Johnson
-        }
+        },
+        self.company_resolver = CompanyResolver(),
+        self.logger = logging.getLogger(__name__)
 
-
-    def get_company_ticker_cik(self, ticker: str) -> Optional[str]:
-        # convert stock ticker to SEC CIK
-        return self.ticker_to_cik.get(ticker.upper())
-
-        
     def company_facts(self, ticker: str) -> Optional[Dict]:
         """
-        REAL SEC API call: fetches actual financial data
+        Production: Fetches data for ANY public company with proper error handling
         """
-        cik = self.get_company_ticker_cik(ticker)
+        cik = self.company_resolver.get_cik(ticker)
         if not cik:
-            print(f" unknown ticker symbol: {ticker}")
+            self.logger.error(F"❌ CIK not found for ticker: {ticker}")
             return None
         
-        url = f"{self.base_url}/companyfacts/cik/{cik}.json"
+        url = f"{self.base_url}/companyfacts/CIK/{cik}.json"
 
         try:
-            response = requests.get(url, headers=self.headers)
+            time.sleep(0.2)  # Rate limiting: 2 requests per second
+            response = requests.get(url, headers=self.headers, timeout=30)
             if response.status_code == 200:
-                print(f" ✅ Successfully fetched SEC data for {ticker}")
+                self.logger.info(f"✅ Successfully fetched SEC data for {ticker}")
                 return response.json()
-
+            elif response.status_code == 404:
+                self.logger.warning(f"No SEC data found for {ticker}")
+                return None
             else:
-                print(f" Failed to fetch SEC data for {ticker}, status code: {response.status_code}")
+                self.logger.error(f"❌ SEC API error {response.status_code} for {ticker}")
                 return None
             
-        except Exception as e:
-            print(f"❌ Network error: {e}")
+        except requests.exceptions.Timeout:
+            self.logger.error(f"❌ SEC API timeout for {ticker}")
             return None
         
-    def extract_key_metrics(self, company_facts: Dict, ticker: str) -> Dict:
-        """
-        Extract key financial metrics from SEC data
-        """
-        if not company_facts or 'facts' not in company_facts:
-            print("No financial data found to extract")
-            return {}
+        except Exception as e:
+            self.logger.error(f"❌ Unexpected error for {ticker}: {e}")
+            return None
+
+
+              
+    def get_available_metrics(self, ticker: str) -> List[str]:
+
+        facts = self.company_facts(ticker)
+        if not facts:
+            return []
         
-        metrics = {}
-        facts = company_facts['facts']
-
-        # US-GAAP financial metrics
-        if 'us-gaap' in facts:
-            gaap = facts['us-gaap']
-
-            # Revenue
-            if 'Revenue' in gaap and 'units' in gaap['Revenue']:
-                revenue_data = gaap['Revenue']['units'].get('USD', [])
-                if revenue_data:
-                    metrics['Revenue'] = revenue_data[0]['val']
-                    metrics['Revenue_currency'] = 'USD'
-
-        # Assets
-        if 'Assets' in gaap and 'units' in gaap['Assets']:
-            assets_data = gaap['Assets']['units'].get('USD', [])
-            if assets_data:
-                metrics['assets'] = assets_data[0]['val']
-
-        # Net Income
-        if 'NetIncomeLoss' in gaap and 'units' in gaap['NetIncomeLoss']:
-            net_income_data = gaap['NetIncomeLoss']['units'].get('USD', [])
-            if net_income_data:
-                metrics['net_income'] = net_income_data[0]['val']
-
-        print(f"📊 Extracted {len(metrics)} key metrics for {ticker}")
-        return metrics
-    
-
-    
-# TEST WITH REAL DATA        
-if __name__ == "__main__":
-    collector = SECDataCollector(email="sasishasank2@gmail.com")
-
-    # Test with Apple - REAL API CALL
-    print("🔄 Fetching REAL Apple financial data from SEC...")
-    apple_data = collector.company_facts("AAPL")
-
-    if apple_data:
-        metrics = collector.extract_key_metrics(apple_data, "AAPL")
-        print("f💰 Apple Financial Metrics:")
-        for metric, value in metrics.items():
-            print(f" {metric}: {value}")
-
-    else:
-        print("❌ Failed to fetch Apple data")
+        metrics = []
         
-        
-            
+        # 1. US-GAAP Financial Metrics (500+ metrics)
+        if 'facts' in facts and 'us-gaap' in facts['facts']:
+            metrics.extend(list(facts['facts']['us-gaap'].keys()))
 
+        # 2. DEI - Company Entity Information
+        if 'facts' in facts and 'dei' in facts['facts']:
+            metrics.extend(list(facts['facts']['dei'].keys()))
 
-            
+        # 3. Other namespaces (if available)
+        if 'facts' in facts:
+            for namespace in facts['facts']:
+                if namespace not in ['us-gaap', 'dei']:
+                    metrics.extend(list(facts['facts'][namespace].keys()))
+
+        return sorted(metrics)
+

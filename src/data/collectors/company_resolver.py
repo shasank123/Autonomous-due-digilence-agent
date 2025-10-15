@@ -22,7 +22,7 @@ class CompanyResolver:
                 ticker = company.get('ticker')
                 cik_str = str(company.get('cik_str', '')).zfill(10)
                 if ticker and cik_str:
-                    ticker_map[;ticker.upper()] = cik_str
+                    ticker_map[ticker.upper()] = cik_str
             print(f"✅ Loaded {len(ticker_map)} companies from SEC")
             return ticker_map
         
@@ -43,3 +43,24 @@ class CompanyResolver:
                 results.append({'ticker': ticker, 'cik': cik})
 
         return results[:10]  # Return top 10 matches
+    
+
+if __name__ == "__main":
+    resolver = CompanyResolver()
+    print("🧪 Testing Company Resolver...")
+
+    test_tickers = ["AAPL", "TSLA", "COST", "UNKNOWN"]# Testing with known companies
+
+    for ticker in test_tickers:
+        cik = resolver.get_cik(ticker)
+
+        if cik:
+            print(f"✅ {ticker} → CIK: {cik}")
+        else:
+            print(f"❌ {ticker} not found")
+
+    print(f"📊 Total companies loaded: {len(resolver.ticker_map)}")
+
+
+
+

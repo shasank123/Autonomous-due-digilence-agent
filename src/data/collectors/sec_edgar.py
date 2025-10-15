@@ -1,19 +1,23 @@
-import json
+python src/data/collectors/company_resolver.pyimport json
 import requests
 import time
 from typing import Dict,List,Optional
 import logging
 from company_resolver import CompanyResolver
+from dotenv import load_dotenv
+import os
+
+load_dotenv() # Load .env variables
 
 class SECDataCollector:
     """
     Production-grade SEC data collector with error handling & rate limiting
     """
-    def __init__(self, email: str):
-        self.email = email
+    def __init__(self, email: str = None):
+        self.email = email or os.getenv('SEC_EDGAR_EMAIL','default@gmail.com')
         self.base_url = "https://data.sec.gov/api/xbrl"
         self.headers = {
-            'user_agent': email,
+            'user_agent': self.email,
             'Accept-Encoding': 'gzip, deflate'
         },
         self.company_resolver = CompanyResolver(),

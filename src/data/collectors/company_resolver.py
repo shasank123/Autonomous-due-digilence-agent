@@ -36,7 +36,7 @@ class CompanyResolver:
     def search_companies(self, query: str) -> list:
         """Search companies by name or ticker"""
         results = []
-        query = query.lower()
+        query = query.upper()
         
         for ticker, cik in self.ticker_map.items():
             if query in ticker:
@@ -45,7 +45,7 @@ class CompanyResolver:
         return results[:10]  # Return top 10 matches
     
 
-if __name__ == "__main":
+if __name__ == "__main__":
     resolver = CompanyResolver()
     print("🧪 Testing Company Resolver...")
 
@@ -58,6 +58,15 @@ if __name__ == "__main":
             print(f"✅ {ticker} → CIK: {cik}")
         else:
             print(f"❌ {ticker} not found")
+
+    print(f"📊 Total companies loaded: {len(resolver.ticker_map)}")
+
+    # testing search function
+    print("\n🔍 Testing Search:")
+    search_results = resolver.search_companies("APP")
+
+    for result in search_results:
+        print(f" {result['ticker']} -> {result['cik']}")
 
     print(f"📊 Total companies loaded: {len(resolver.ticker_map)}")
 

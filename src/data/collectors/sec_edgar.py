@@ -1,4 +1,4 @@
-python src/data/collectors/company_resolver.pyimport json
+import json
 import requests
 import time
 from typing import Dict,List,Optional
@@ -14,13 +14,16 @@ class SECDataCollector:
     Production-grade SEC data collector with error handling & rate limiting
     """
     def __init__(self, email: str = None):
+        load_dotenv()
+        print(f"DEBUG: SEC_EDGAR_EMAIL = {os.getenv('SEC_EDGAR_EMAIL')}")
         self.email = email or os.getenv('SEC_EDGAR_EMAIL','default@gmail.com')
+        print(f"DEBUG: Using email = {self.email}")
         self.base_url = "https://data.sec.gov/api/xbrl"
         self.headers = {
-            'user_agent': self.email,
+            'User-Agent': self.email,
             'Accept-Encoding': 'gzip, deflate'
-        },
-        self.company_resolver = CompanyResolver(),
+        }
+        self.company_resolver = CompanyResolver()
         self.logger = logging.getLogger(__name__)
 
     def company_facts(self, ticker: str) -> Optional[Dict]:
@@ -32,7 +35,7 @@ class SECDataCollector:
             self.logger.error(F"❌ CIK not found for ticker: {ticker}")
             return None
         
-        url = f"{self.base_url}/companyfacts/CIK/{cik}.json"
+        url = f"{self.base_url}/companyfacts/CIK{cik}.json"
 
         try:
             time.sleep(0.2)  # Rate limiting: 2 requests per second
@@ -80,4 +83,34 @@ class SECDataCollector:
                     metrics.extend(list(facts['facts'][namespace].keys()))
 
         return sorted(metrics)
+    
+
+if __name__ == "__main__":
+    collector = SECDataCollector()
+    print("🧪 Testing SEC Data Collector...")
+
+    # Test 1: Fetch company data
+    test_tickers = ["AAPL", "TSLA", "INVALID"]
+
+    for ticker in test_tickers:
+        print(f"\n📊 Testing {ticker}:")
+        facts = collector.company_facts(ticker)
+        if facts:
+            print(f"✅ Successfully fetched data for {ticker}")
+
+            # Test 2: Get available metrics
+            metrics = collector.get_available_metrics(ticker)
+            print(f"   Available metrics: {len(metrics)}")
+            if metrics:
+                print(f"   Sample metrics: {metrics[:5]}")  # First 5 metrics
+            else:
+                print(f"❌ Failed to fetch data for {ticker}")
+
+    # Test 3: Test error handling
+    print(f"\n🔧 Testing error handling...")
+    invalid_data = collector.company_facts("UNKNOWN")
+    if not invalid_data:
+        print("✅ Properly handled invalid ticker")
+
+        
 

@@ -27,9 +27,21 @@ class SECDataCollector:
         self.logger = logging.getLogger(__name__)
 
     def company_facts(self, ticker: str) -> Optional[Dict]:
+        
         """
-        Production: Fetches data for ANY public company with proper error handling
-        """
+    Fetches company financial data from SEC
+    
+    Returns structured data like:
+    {
+      "facts": {
+        "us-gaap": {
+          "Revenue": {
+            "units": {"USD": [{"val": 383285000000, "end": "2023-09-30"}]}
+          }
+        }
+      }
+    }
+    """
         cik = self.company_resolver.get_cik(ticker)
         if not cik:
             self.logger.error(F"❌ CIK not found for ticker: {ticker}")

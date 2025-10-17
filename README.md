@@ -104,6 +104,23 @@ src/
 ├── rag/                # Vector search system
 └── agents/             # AI agent orchestration
 
+## 🧪 Testing
+
+### Data Pipeline Tests:
+
+```bash
+# Test Company Resolver (10,000+ companies)
+python src/data/collectors/company_resolver.py
+
+# Test SEC Data Collector  
+python src/data/collectors/sec_edgar.py
+
+# Test Document Processor
+python src/data/processors/document_parser.py
+
+# Test Full RAG Pipeline
+python src/rag/core.py
+
 🤝 Contributing
 
 Fork the project

@@ -1,14 +1,20 @@
 from langchain_core.documents import Document
 from typing import List, Dict
 import json
+import logging
 
 class DocumentProcessor:
+    
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+       
     """
     Processes ALL financial metrics and calculates ratios
     """
+
     def process_sec_facts(self, company_facts: Dict, ticker: str) -> List[Document]:
       
-    # Converts ALL SEC financial data into comprehensive documents
+        # Converts ALL SEC financial data into comprehensive documents
         documents = []
 
         if not company_facts or 'facts' not in company_facts:       
@@ -16,14 +22,14 @@ class DocumentProcessor:
         
         # Extract company info
         company_info = self._extract_company_info(company_facts,ticker)
-        documents.append(company_info)
+        documents.extend(company_info)
 
         # Process ALL financial metrics
         financial_docs = self._process_financial_metrics(company_facts,ticker)
         documents.extend(financial_docs)
 
         # Calculate and add financial ratios
-        ratio_docs = self._calculate_financial_ratios(company_facts,ticker)
+        ratio_docs = self._compute_financial_ratios(company_facts,ticker)
         documents.extend(ratio_docs)
 
         print(f" created {len(documents)} comprehensive documents for {ticker}")
@@ -87,7 +93,7 @@ class DocumentProcessor:
         for metric in key_metrics:
             if metric in financial_facts:
                 metric_data = financial_facts[metric]
-                docs = self._create_financial_metric(metric, metric_data, ticker)
+                docs = self._create_metric_documents(metric, metric_data, ticker)
                 documents.extend(docs)
         return documents
     
@@ -102,7 +108,7 @@ class DocumentProcessor:
 
             # Take latest 3 periods for trend analysis
             for value in values[:3]:
-                content = self._format_financial_content(metric, unit, value, ticker)
+                content = self._format_financial_content(metric, ticker, unit, value)
 
                 document = Document(
                     page_content=content,
@@ -127,7 +133,7 @@ class DocumentProcessor:
         return f"""
         Company: {ticker}
         Financial Metric: {self._humanize_metric_name(metric)}
-        Value: {value.get('val', 'N/A'):,} {unit}
+        Value: {value.get('val', 'N/A')} {unit}
         Period End: {value.get('end', 'N/A')}
         Filed Date: {value.get('filed', 'N/A')}
         Form Type: {value.get('form', 'N/A')}
@@ -156,7 +162,7 @@ class DocumentProcessor:
         # Extract latest values for ratio calculation
         financial_data = self._extract_latest_values(company_facts)
         #Calculate key financial ratios
-        ratios = self._get_compute_ratios(financial_data)
+        ratios = self._compute_ratios(financial_data)
 
         # Create ratio documents
         for ratio_name, ratio_value in ratios.items():
@@ -169,7 +175,7 @@ class DocumentProcessor:
                 Calculation Period: Latest Available Data
                 """
 
-                documents = Document(
+                document = Document(
                     page_content= content.strip(),
                     meta_data = {
                         "source": "calculated",
@@ -179,11 +185,11 @@ class DocumentProcessor:
                         "data_type": "calculated_metric"
                     }
                 )
-                documents.append(documents)
+                documents.append(document)
 
         return documents
     
-    def _extract_values(self, company_facts: Dict) -> Dict[str, float]:
+    def _extract_latest_values(self, company_facts: Dict) -> Dict[str, float]:
 
         #Extract latest values for ratio calculations
         values = {}
@@ -206,11 +212,11 @@ class DocumentProcessor:
         }
 
         for metric_key, value_key in metric_map.items():
-            if metric_key in financial_facts and 'USD' in financial_facts['metric_key'].get('units',{}):
-                usd_values= financial_facts['metric_key']['units']['USD']
+            if metric_key in financial_facts and 'USD' in financial_facts[metric_key].get('units',{}):
+                usd_values= financial_facts[metric_key]['units']['USD']
 
                 if usd_values:
-                    values['value_keys'] = usd_values[0]['val']
+                    values[value_key] = usd_values[0]['val']
 
         return values
 
@@ -272,7 +278,7 @@ class DocumentProcessor:
         return ratios
 
              
-    def get_ratio_interpretation(self, ratio_name: str, value: float) -> str:
+    def _get_ratio_interpretation(self, ratio_name: str, value: float) -> str:
 
         interpretations = {
             'Return on Assets (ROA)': "Good > 5%, Excellent > 10%" if value > 5 else "Needs improvement < 5%",
@@ -283,6 +289,89 @@ class DocumentProcessor:
         
         return interpretations.get(ratio_name, "Industry context needed for full interpretation")
 
+
+
+if __name__ == "__main__":
+    processor = DocumentProcessor()
+    print("🧪 Testing Document Processor...")
+
+    # Test 1: Create sample SEC data
+    sample_sec_data = {
+        "facts": {
+            "us-gaap": {
+                "Revenue": {
+                    "units": {
+                        "USD": [
+                            {"val": 1000000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"},
+                            {"val": 900000000, "end": "2022-12-31", "form": "10-K", "filed": "2023-01-31"}
+                        ]
+                    }
+                },
+                "Assets": {
+                    "units": {
+                        "USD": [
+                            {"val": 500000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
+                        ]
+                    }
+                }
+            },
+            "dei": {
+                "EntityRegistrantName": {
+                    "units": {
+                        "USD": [
+                            {"val": "TEST COMPANY INC"}
+                        ]
+                    }
+                }
+            }
+        }
+    }
+
+    # Test 2: Process documents
+    print("1. Testing document processing...")
+    documents = processor.process_sec_facts(sample_sec_data, "TEST")
+    print(f"✅ Created {len(documents)} documents")
+
+     # Test 3: Show document samples
+    print("\n2. Document samples:")
+    for i,doc in enumerate(documents[:3]):
+        print(f" document: {i+1}")
+        print(f" content: {doc.page_content[:100]}")
+        meta_data = {k: doc.metadata[k] for k in list(doc.metadata)[:3]}
+        print(f"  Metadata: {meta_data}")  # First 3 metadata items
+
+    # Test 4: Test ratio calculations
+    print("3. Testing ratio calculations...")
+    financial_data = processor._extract_latest_values(sample_sec_data)
+    print(f"   Extracted data: {financial_data}")
+
+    ratios = processor._compute_ratios(financial_data)
+    print(f"   Calculated ratios: {ratios}")
+
+    # Test 5: Test individual components
+    print("\n4. Testing helper functions...")
+
+    # Test humanize metric name
+    test_metrics = ["Revenue", "NetIncomeLoss", "CashAndCashEquivalents"]
+    for metric in test_metrics:
+        humanized = processor._humanize_metric_name(metric)
+        print(f"  {metric} → {humanized}")
+
+    # Test ratio interpretation
+    test_ratios = {
+        "Return on Assets (ROA)": 8.5,
+        "Current Ratio": 1.2,
+        "Debt to Equity": 0.3
+    }
+
+    for ratio, value in test_ratios.items():
+        interpretation = processor._get_ratio_interpretation(ratio, value)
+        print(f" {ratio} ({value}): {interpretation}")
+
+    print("\n🎯 Document Processor tests completed!")
+
+
+        
 
 
 

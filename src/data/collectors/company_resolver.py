@@ -9,7 +9,15 @@ class CompanyResolver:
 
     def load_ticker_map(self) -> Dict[str, str]:
         
-        """Load all 10,000+ companies from SEC"""
+        """
+    Load all 10,000+ companies from SEC
+    
+    SEC API returns:
+    {
+      "0": {"cik_str": 320193, "ticker": "AAPL", "title": "APPLE INC"},
+      "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"}
+    }
+    """
         try:
             # SEC official company tickers JSON
             url = "https://www.sec.gov/files/company_tickers.json"

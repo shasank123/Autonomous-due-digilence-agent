@@ -161,11 +161,8 @@ class DocumentProcessor:
         
         # Extract latest values for ratio calculation
         financial_data = self._extract_latest_values(company_facts)
-        print(f"DEBUG: Extracted financial data for ratios: {financial_data}")  # Debug
-
         #Calculate key financial ratios
         ratios = self._compute_ratios(financial_data)
-        print(f"DEBUG: Computed ratios: {ratios}")  # Debug line
 
         # Create ratio documents
         for ratio_name, ratio_value in ratios.items():
@@ -179,8 +176,8 @@ class DocumentProcessor:
                 """
 
                 document = Document(
-                    page_content= content.strip(),
-                    metadata = {
+                    page_content=content.strip(),
+                    metadata={  # FIXED: Changed from meta_data to metadata
                         "source": "calculated",
                         "company": ticker, 
                         "metric": ratio_name,
@@ -189,7 +186,7 @@ class DocumentProcessor:
                     }
                 )
                 documents.append(document)
-        print(f"DEBUG: Created {len(documents)} ratio documents")  # Debug line
+
         return documents
     
     def _extract_latest_values(self, company_facts: Dict) -> Dict[str, float]:
@@ -263,16 +260,12 @@ class DocumentProcessor:
                     ratios['Asset Turnover'] = financial_data['revenue'] / financial_data['total_assets']
                 else:
                     self.logger.warning("Total assets is zero, skipping Asset Turnover calculation")
-
-            ratios_to_remove = []
+        
             for ratio_name, ratio_value in ratios.items():
                 if ratio_value == float('inf') or ratio_value == float('-inf'):
                     self.logger.warning(f"invalid ratio value for {ratio_name}: {ratio_value}")
-                    ratios_to_remove.append(ratio_name)
+                    del ratios[ratio_name]
 
-            for ratio_name in ratios_to_remove:
-                del ratios[ratio_name]
-            
         except (ZeroDivisionError, KeyError) as e:
             self.logger.error(f"Unexpected error in ratio calculation: {e}")
             return ratios
@@ -372,7 +365,7 @@ if __name__ == "__main__":
     print("\n2. Document samples:")
     for i,doc in enumerate(documents[:3]):
         print(f" document: {i+1}")
-        print(f" content: {doc.page_content[:100]}")
+        print(f" content: {doc.page_content[:100]}...")
         meta_data = {k: doc.metadata[k] for k in list(doc.metadata)[:3]}
         print(f"  Metadata: {meta_data}")  # First 3 metadata items
 
@@ -396,23 +389,10 @@ if __name__ == "__main__":
     print(f"   Extracted data: {financial_data}")
 
     print("\n Testing ratio document creation...")
-    sample_sec_data = {
-    "facts": {
-        "us-gaap": {
-            "Revenue": {"units": {"USD": [{"val": 1000000000}]}},
-            "Assets": {"units": {"USD": [{"val": 500000000}]}},
-            "NetIncomeLoss": {"units": {"USD": [{"val": 250000000}]}},
-            "Liabilities": {"units": {"USD": [{"val": 200000000}]}},
-            "StockholdersEquity": {"units": {"USD": [{"val": 800000000}]}},
-            "CurrentAssets": {"units": {"USD": [{"val": 300000000}]}},
-            "CurrentLiabilities": {"units": {"USD": [{"val": 150000000}]}}
-        }
-    }
-}
     ratio_docs = processor._compute_financial_ratios(sample_sec_data, "TEST")
     print(f"   Created {len(ratio_docs)} ratio documents")
     for doc in ratio_docs:
-        print(f" Ratio doc: {doc.metadata}")
+        print(f" Ratio doc metadata: {doc.metadata}")
         print(f" Ratio doc content: {doc.page_content[:100]}...")
 
     print("\n6. Testing _compute_ratios directly...")
@@ -447,22 +427,3 @@ if __name__ == "__main__":
         print(f" {ratio} ({value}): {interpretation}")
 
     print("\n🎯 Document Processor tests completed!")
-
-
-        
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-                
-    

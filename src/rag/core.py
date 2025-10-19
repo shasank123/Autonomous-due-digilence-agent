@@ -7,7 +7,7 @@ import os
 from typing import List, Optional, Dict, Any
 import logging
 
-class ProductionRagsystem:
+class ProductionRAGSystem:
 
     #Production RAG system with advanced features
     def __init__(self,
@@ -61,14 +61,12 @@ class ProductionRagsystem:
             # Split documents into chunks for better retrieval
             all_chunks = []
             for doc in documents:
-                chunks = self.text_splitter.split_documents(doc)
+                chunks = self.text_splitter.split_documents([doc])
                 all_chunks.extend(chunks)
             self.logger.info(f"Split {len(documents)} documents into {len(all_chunks)} chunks")
             
             # Add to vector store
             doc_ids = self.vector_store.add_documents(all_chunks)
-            self.vector_store.persist()
-
             self.logger.info(f"✅ Added {len(doc_ids)} document chunks to vector store")
             return doc_ids
         
@@ -77,15 +75,17 @@ class ProductionRagsystem:
             return []
         
 
-    def query(self, 
+    def query_with_similarity_scores(self, 
               question: str,
               k : int = 5,
               company: Optional[str] = None,
               metric_type : Optional[str] = None,
-              score_threshold: float = 0.7) -> List[Document]:
+              score_threshold: float = 0.7) -> List[tuple[Document, float]]:
         
-        #Advanced querying with filters and score thresholding
-        
+        """
+    Query with similarity scores for filtering
+    Returns: List of (Document, score) tuples
+    """
         search_kwargs = {"k": k}
         filters = {}
 
@@ -97,25 +97,53 @@ class ProductionRagsystem:
             filters["doc_type"] = metric_type
 
         if filters:
-            search_kwargs["filters"] = filters
+            search_kwargs["filter"] = filters
              
         self.logger.info(f"🔍 Query: '{question}' | Filters: {filters}")
 
         try:
             # Get results with scores
-            scores_with_results = self.query_with_similarity_scores(
+            scores_with_results = self.vector_store.similarity_search_with_score(
             question,
             **search_kwargs
         )
             # Filter by score threshold
             filtered_results = [
-                doc for doc, score in scores_with_results
+                (doc, score) for doc, score in scores_with_results
                 if score >= score_threshold
             ]
 
-            self.logger.info(f""✅ Found {len(filtered_results)} relevant documents (score >= {score_threshold})"")
+            self.logger.info(f"✅ Found {len(filtered_results)} relevant documents (score >= {score_threshold})")
 
             return filtered_results
+        
+        except Exception as e:
+            self.logger.error(f"❌ Query failed: {e}")
+            return []
+        
+    def query(
+            self,
+            question: str,
+            k: int = 5,
+            company: Optional[str] = None,
+            metric_type: Optional[str] = None) -> list[Document]:        
+        
+        """Query method that uses query_with_similarity_scores internally
+        Returns only documents (strips scores)
+        """  
+        try:
+            # Call query_with_similarity_scores and extract just documents
+            scores_with_results = self.query_with_similarity_scores(
+                question=question,
+                k=k,
+                company=company,
+                metric_type=metric_type
+
+            )
+            # Strip scores, return only documents
+            documents = [doc for doc, score in scores_with_results]
+            self.logger.info(f"✅ Query found {len(documents)} documents")
+            return documents
         
         except Exception as e:
             self.logger.error(f"❌ Query failed: {e}")
@@ -125,25 +153,46 @@ class ProductionRagsystem:
     def get_company_metrics(self, company: str) -> List[str]:
 
         #Get all available metrics for a company
-
         try:
-            # Query for company overview to see available metrics
-            results = self.query(
-                f"metrics financial data {company}",
-                company = company,
-                k = 20
-            )
+            queries = [
+                f"{company} financial",
+                f"{company} revenue",
+                f"{company} assets"
+            ]
 
-            metrics = set()
-            for doc in results:
-                if "metric" in doc.metadata:
-                    metrics.add(doc.metadata["metric"])
+            all_metrics = set()    
 
-            return sorted(list(metrics))
-        
+            for query in queries:
+                results = self.query(
+                    query,
+                    company = company,
+                    k = 20
+                )
+                # Debug purpose
+                print(f"DEBUG: Found {len(results)} documents for metrics query")
+                for i, doc in enumerate(results):
+                    print(f" doc{i}: Metadata keys: {list(doc.metadata.keys())}")
+
+                for doc in results:
+                    if doc.metadata.get("metric"):
+                        all_metrics.add(doc.metadata["metric"])
+
+                print(f"DEBUG: Found metrics: {list(all_metrics)}")
+                return sorted(list(all_metrics))
+
+                results_no_filter = self.query(f"{company} financial", k=20)
+
+                for doc in results_no_filter:
+                    if "metric" in doc.metadata:
+                        all_metrics.add(doc.metadata["metric"])
+
+            return sorted(list(all_metrics))
+            
         except Exception as e:
             self.logger.error(f"❌ Failed to get company metrics: {e}")
             return []
+        
+        
 
 
     def clear_company_data(self, company: str) -> bool:
@@ -153,8 +202,7 @@ class ProductionRagsystem:
             self.vector_store._collection.delete(
                 where= {"company": company.upper()}
             )
-
-            self.vector_store.persist()
+         
             self.logger.info(f"✅ Cleared all data for {company}")
             return True
 
@@ -176,131 +224,98 @@ class ProductionRagsystem:
         except Exception as e:
             self.logger.error(f"❌ Failed to get stats: {e}")
             return {}
+# Production test function
+def test_production_rag():
+    """
+    Test the production RAG system end-to-end
+    """
+    import os
+    import sys
 
-    # Production test function        
-    def test_production_rag():
-        from data.collectors.sec_edgar import SECDataCollector
-        from data.processors.document_parser import DocumentProcessor
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    sys.path.append(project_root)
 
-        print("🧪 Testing Production RAG System...")
+    from src.data.collectors.sec_edgar import SECDataCollector
+    from src.data.processors.document_parser import DocumentProcessor
+    
+    print("🧪 Testing Production RAG System...")
+    
+    # Initialize components
+    collector = SECDataCollector()
+    processor = DocumentProcessor()
+    rag_system = ProductionRAGSystem()
+    
+    # Test with a company
+    test_companies = ["AAPL", "MSFT", "TSLA"]
+    
+    for ticker in test_companies[:1]:  # Test with one company first
+        print(f"\n🔧 Testing with {ticker}...")
         
-        # Initialize components
-        collector = SECDataCollector()
-        processor = DocumentProcessor()
-        rag_system = ProductionRagsystem()
+        # 1. Fetch data
+        print("1. Fetching SEC data...")
+        company_data = collector.company_facts(ticker)
+        
+        if not company_data:
+            print(f"❌ Failed to fetch data for {ticker}")
+            continue
+        
+        # 2. Process into documents
+        print("2. Processing documents...")
+        documents = processor.process_sec_facts(company_data, ticker)
+        
+        if not documents:
+            print(f"❌ No documents created for {ticker}")
+            continue
+        
+        # 3. Add to RAG system
+        print("3. Adding to RAG system...")
+        doc_ids = rag_system.add_company_data(documents)
+        
+        # 4. Test queries
+        print("4. Testing queries...")
+        
+        # Financial query
+        financial_results = rag_system.query_with_similarity_scores(
+            f"What is {ticker}'s revenue and profit?",
+            company=ticker
+        )
+        print(f" Financial results: {len(financial_results)} documents")
+        
+        # Ratio query
+        """
+        # chromaDB free version doesnt support multiple filter conditions
+        ratio_results = rag_system.query_with_similarity_scores(
+            f"financial ratios performance",
+            company=ticker,
+            metric_type="financial_ratio"
+        )
+        """
 
-        test_companies = ["AAPL", "MSFT", "TSLA"]
-
-        for ticker in test_companies[:1]:  # testing with one company
-            print(f"\n🔧 Testing with {ticker}...")
-
-            # Fetch data
-            print("1. Fetching SEC data...")
-            company_data = collector.company_facts(ticker)
-
-            if not company_data:
-                print(f"❌ Failed to fetch data for {ticker}")
-                continue
-
-            #Process into documents
-            print("2. Processing documents...")
-            documents = processor.process_sec_facts(company_data, ticker)
-
-            if not documents:
-                print(f"❌ No documents created for {ticker}")
-                continue
-
-            #Add to RAG system
-            print("3. Adding to RAG system...")
-            doc_ids = rag_system.add_documents(documents)
-
-            # Test queries
-            print("4. Testing queries...")
-
-            # Financial query
-            financial_results = rag_system.query(
-                f" what is {ticker}'s revenue and profit",
-                company = ticker
-            )
-            print(f"financial results: {len(financial_results)} documents")
-
-            # Ratio query
-            ratio_results = rag_system.query(
-                f"financial ratios performance",
-                company = ticker,
-                metric_type = "financial_ratio"
-            )
-            print(f"ratio results: {len(ratio_results)} doucments")
-
-            #Get metrics
-            metrics = rag_system.get_company_metrics(ticker)
-            print(f" Available metrics: {len(metrics)}")
-
-            #Get stats
-            stats = rag_system.get_stats()
-            print(f" System stats: {stats}")
+        # Ratio query
+        all_ratio_results = rag_system.query_with_similarity_scores(
+            f" finanicial ratios performance",
+            metric_type="financial_ratio"
+        )
+        #  filter by company
+        ratio_results = [
+            (doc, score) for doc, score in all_ratio_results
+            if doc.metadata['company'] == ticker
+        ]
+       
+        print(f"  Ratio results: {len(ratio_results)} documents")
+        
+        # 5. Get metrics
+        metrics = rag_system.get_company_metrics(ticker)
+        print(f"  Available metrics: {len(metrics)}")
+        
+        # 6. Get stats
+        stats = rag_system.get_stats()
+        print(f"  System stats: {stats}")
 
     print("\n✅ Production RAG test completed!")
 
-
-    if __name__ == "__main":
-        test_production_rag()
-            
+if __name__ == "__main__":
+    test_production_rag()
     
 
-
-
-
-
-
-        
-
-        
-
-
-
-        
-  
-    
-
-
-
-
-    
-        self.vector_store = Chroma(
-            persist_directory=persist_directory,
-            embedding_function=self.embeddings
-            )
-    
-    def add_documents(self, documents: List[Document]) -> List[str]:
-        return self.vector_store.add_documents(documents)
-    
-    def query(self,
-              question: str,
-              k: int = 5,
-              filter_metadata: Optional[dict] = None
-              ) -> List[Document]:
-        search_kwargs = {"k": k}
-        if filter_metadata:
-            search_kwargs["filter"] = filter_metadata
-            return self.vector_store.similarity_search(question, **search_kwargs)
-        
-    def query_with_similarity_scores(
-            self,
-            question: str,
-            k: int = 5) -> List[tuple[Document, float]]:
-        return self.vector_store.similarity_search_with_score(question, k=k)
-
-    def document_count(self) -> int:
-        return self.vector_store._collection.count()
-
-    def persist(self):
-        self.vector_store.persist()
-
-
-    
-              
-              
-
-        
        

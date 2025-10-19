@@ -3,7 +3,7 @@ import requests
 import time
 from typing import Dict,List,Optional
 import logging
-from company_resolver import CompanyResolver
+from .company_resolver import CompanyResolver
 from dotenv import load_dotenv
 import os
 

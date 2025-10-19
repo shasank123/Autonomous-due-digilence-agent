@@ -1,8 +1,8 @@
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 import os
 from typing import List, Optional, Dict, Any
 import logging
@@ -149,51 +149,53 @@ class ProductionRAGSystem:
             self.logger.error(f"❌ Query failed: {e}")
             return []
         
-
     def get_company_metrics(self, company: str) -> List[str]:
 
-        #Get all available metrics for a company
+        """Get all available metrics for a company using direct metadata scanning"""
         try:
-            queries = [
-                f"{company} financial",
-                f"{company} revenue",
-                f"{company} assets"
-            ]
+            # Use ChromaDB's direct metadata query - most reliable approach
+            results = self.vector_store._collection.get(
+                where={"company": company.upper()}
+            )
+            
+            all_metrics = set()
 
-            all_metrics = set()    
+            if results and 'metadatas' in results:
+                for metadata in results['metadatas']:
+                    if metadata and 'metric' in metadata and metadata['metric']:
+                        all_metrics.add(metadata['metric'])
 
+            self.logger.info(f"Found {len(all_metrics)} unique metrics for {company}")
+         
+            # If direct method fails, fallback to similarity search
+            if not all_metrics:
+                self.logger.info("Falling back to similarity search for metrics...")
+                return self._get_metrics_via_similarity(company)
+            
+            return sorted(list(all_metrics))
+        
+        except Exception as e:
+            self.logger.error(f"❌ Failed to get company metrics: {e}")
+            return []
+            
+    def _get_metrics_via_similarity(self, company: str) -> List[str]:
+
+        """Fallback method using similarity search"""
+        try:
+            queries = [f"{company} financial", company]
+            all_metrics = set()
+            
             for query in queries:
-                results = self.query(
-                    query,
-                    company = company,
-                    k = 20
-                )
-                # Debug purpose
-                print(f"DEBUG: Found {len(results)} documents for metrics query")
-                for i, doc in enumerate(results):
-                    print(f" doc{i}: Metadata keys: {list(doc.metadata.keys())}")
-
+                results = self.query(query, k=50, company=company)
                 for doc in results:
                     if doc.metadata.get("metric"):
                         all_metrics.add(doc.metadata["metric"])
 
-                print(f"DEBUG: Found metrics: {list(all_metrics)}")
-                return sorted(list(all_metrics))
-
-                results_no_filter = self.query(f"{company} financial", k=20)
-
-                for doc in results_no_filter:
-                    if "metric" in doc.metadata:
-                        all_metrics.add(doc.metadata["metric"])
-
             return sorted(list(all_metrics))
-            
+        
         except Exception as e:
-            self.logger.error(f"❌ Failed to get company metrics: {e}")
+            self.logger.error(f"Similarity search fallback failed: {e}")
             return []
-        
-        
-
 
     def clear_company_data(self, company: str) -> bool:
 

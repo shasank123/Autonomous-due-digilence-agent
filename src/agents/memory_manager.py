@@ -142,9 +142,72 @@ class MemoryManager:
                     "timestamp": result.value.get("timestamp")
                     }
             )
-            
+
         return risks
     
+    def get_cross_analysis_insights(
+            self,
+            user_id: str,
+            current_company: str,
+            analysis_type: str
+    ) -> Dict[str, Any]:
+        """Get relevant insights from previous analyses"""
+
+        # Create empty container for insights
+        insights = {
+            "financial_patterns": [],
+            "legal_risks": [],
+            "similar_companies": []
+        }
+        
+        try:
+            # Find similar financial patterns
+            financial_query = f"financial patterns ratios performance {current_company}"
+            insights["financial_patterns"] = self.search_similar_companies(
+                user_id,
+                financial_query,
+                limit=3
+            )# Example result: [
+            #   {"company": "AAPL", "insight": "High R&D = Growth", ...},
+            #   {"company": "NIO", "insight": "EV companies need capex", ...}
+            # ]
+
+            # Find relevant legal risks
+            legal_query = f"legal complaince risks {current_company}"
+            insights["legal_risks"] = self.search_industry_risks(
+                user_id,
+                legal_query,
+                limit=3
+            )# Example result: [
+            #   {"company": "F", "risk_type": "regulatory", "description": "Emissions  standards", ...},
+            #   {"company": "GM", "risk_type": "safety", "description": "Recall issues", ...}
+            # ]
+             
+
+            # Find companies with similar profiles
+            similarity_query =f"companies similar to {current_company} financial metrics"
+            # Query: "companies similar to TSLA financial metrics"
+            insights["similar_companies"] = self.search_similar_companies(
+                user_id,
+                similarity_query,
+                limit=3
+            )# Example result: [
+            #   {"company": "NIO", "insight": "EV manufacturer growth patterns", ...},
+            #   {"company": "RIVN", "insight": "Electric vehicle market entry", ...}
+            # ]
+
+        except Exception as e:
+            self.logger.warning(f"Cross-analysis insights failed: {e}")
+
+        # Return all gathered insights
+        return insights # Example return: {
+        #   "financial_patterns": [AAPL insights, NIO insights],
+        #   "legal_risks": [F risks, GM risks], 
+        #   "similar_companies": [NIO profile, RIVN profile]
+        # }
+        
+
+
 
 
 

@@ -226,3 +226,7 @@ data/processed/
 # System
 .DS_Store
 Thumbs.db
+
+# temp folder
+**/temp/
+

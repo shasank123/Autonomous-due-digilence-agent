@@ -14,6 +14,7 @@ from src.agents.financial_analyst import FinancialAnalysisAgent
 from src.agents.legal_reviewer import LegalAnalysisAgent
 from src.agents.market_analyst import MarketAnalysisAgent
 from src.rag.core import ProductionRAGSystem
+from src.agents.memory_manager import MemoryManager
 
 class AnalysisState(TypedDict):
     # Inputs - Data coming FROM the user
@@ -38,7 +39,10 @@ class AnalysisState(TypedDict):
     rag_context: Dict[str, Any]
     extracted_metrics: Dict[str, Any]
 
-    # Final Output - Combined results
+    # Memory Insights
+    memory_insights: Dict[str, Any]
+
+    # Final Output - Combined resultsgit
     synthesis_report: Dict[str, Any]
 
     # Error Handling - Using LangGraph reducers
@@ -53,6 +57,7 @@ class DueDigillenceOrchestator:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.rag_system = ProductionRAGSystem()
+        self.memory_manager = MemoryManager()
 
         # Initialize agents
         self.financial_agent = FinancialAnalysisAgent()
@@ -61,7 +66,7 @@ class DueDigillenceOrchestator:
 
         # Build workflow with persistence
         self.graph = self._build_workflow_graph()
-        self.logger.info("DueDiligenceOrchestrator initialized with persistence")
+        self.logger.info("DueDiligenceOrchestrator initialized with persistence and semantic memory")
     
     def _build_workflow_graph(self) -> StateGraph:
         """Build workflow using latest LangGraph patterns"""
@@ -70,19 +75,22 @@ class DueDigillenceOrchestator:
         # Add nodes
         workflow.add_node("initialize_analysis", self._initialize_analysis)
         workflow.add_node("gather_rag_context", self._gather_rag_context)
+        workflow.add_node("gather memory insights", self._gather_memory_insights)
         workflow.add_node("execute_financial_analysis", self._execute_financial_analysis)
         workflow.add_node("execute_legal_analysis", self._execute_legal_analysis)
         workflow.add_node("execute_market_analysis", self._execute_market_analysis)
         workflow.add_node("synthesize_findings", self._synthesize_findings)
+        workflow.add_node("store insights", self._store_insights)
         workflow.add_node("handle_errors", self._handle_errors)
 
         # Define edges using START constant
         workflow.add_edge(START, "initialize_analysis")
         workflow.add_edge("initialize_analysis","gather_rag_context")
+        workflow.add_edge("gather_rag_context", "gather_memory_insights")
 
         # Conditional routing based on analysis type
         workflow.add_conditional_edges(
-            "gather_rag_context",
+            "gather_memory_insights",
             self._route_analysis_type,
             {
                 "financial": "execute_financial_analysis",
@@ -119,7 +127,8 @@ class DueDigillenceOrchestator:
         )
 
         workflow.add_edge("execute_market_analysis", "synthesize_findings")
-        workflow.add_edge("synthesize_findings", END)
+        workflow.add_edge("synthesize_findings", "store_insights")
+        workflow.add_edge("store_insights", END)
         workflow.add_edge("handle_errors", END)
 
          # Compile with persistence
@@ -289,6 +298,71 @@ class DueDigillenceOrchestator:
 
         return state # State now has: progress=0.15, rag_context={financial_docs}, #current_step="gather_rag_context"
     
+    async def _gather_memory_insights(self, state: AnalysisState) -> AnalysisState:
+         """Gather insights from previous analyses using semantic memory"""
+         state["progress"] = 0.25
+         state["current_step"] = "gather_memory_insights"
+         state["last_update"] = datetime.now(timezone.utc).isoformat()
+
+         try:
+             user_id = state.get("user_id", "default_user")
+             company_ticker = state["company_ticker"]
+             # Get cross-analysis insights
+             memory_insights = self.memory_manager.get_cross_analysis_insights(
+                 user_id=user_id,
+                 current_company=company_ticker,
+                 analysis_type=state["analysis_type"]
+             )
+
+             state["memory_insights"] = memory_insights
+             self.logger.info(f" Retrieved {len(memory_insights['financial_patterns'])} memory insights for {company_ticker}")
+
+         except Exception as e:
+             state["warnings".append(f"Memory insights partial: {str(e)}")]
+             state["memory_insights"] = {}
+
+         return state
+    
+    async def _store_insights(self, state: AnalysisState) -> AnalysisState:
+        """Store valuable insights from this analysis for future use"""
+        state["progress"] = 0.98
+        state["current_step"] = "store_insights"
+        state["last_update"] = datetime.now(timezone.utc).isoformat()
+
+        try:
+            user_id = state.get("user_id", "default_user")
+            company_ticker = state["company_ticker"]
+            # Store financial insights
+            if state.get("financial_analysis", {}).get("key_metrics"):
+                financial_insight = f"Financial performance patterns for {company_ticker}"
+                self.memory_manager.store_financial_insight(
+                    user_id=user_id,
+                    company_ticker=company_ticker,
+                    insight=financial_insight,
+                    metrics=state["financial_analysis"]["key_metrics"],
+                    pattern_type="profitability"
+                )
+
+            # Store legal risks
+            if state.get("legal_analysis", {}).get("risk_factors"):
+                for risk in state["legal_analysis"]["risk_factors"]:
+                    severity = self._extract_risk_severity(risk)
+                    self.memory_manager.store_legal_risk(
+                        user_id=user_id,
+                        company_ticker=company_ticker,
+                        risk_type="compliance",
+                        description=risk,
+                        severity=severity,
+                        context=f"Legal analysis for {company_ticker}"
+                    )
+        
+            self.logger.info(f"Stored insights from {company_ticker} analysis")
+
+        except Exception as e:
+            state["warnings"].append(f"Insight storage failed: {str(e)}")
+
+        return state
+   
     async def _execute_financial_analysis(self, state: AnalysisState) -> AnalysisState:
         """Execute financial analysis using Financial Agent"""
         state["progress"] = 0.4
@@ -312,7 +386,7 @@ class DueDigillenceOrchestator:
 
         return state
     
-    async def _legal_analysis(self, state: AnalysisState) -> AnalysisState:
+    async def _execute_legal_analysis(self, state: AnalysisState) -> AnalysisState:
         """Execute legal analysis using Legal Agent"""
         state["progress"] = 0.6
         state["current_step"] = "execute_legal_analysis"
@@ -334,7 +408,7 @@ class DueDigillenceOrchestator:
 
         return state
     
-    async def _market_analysis(self, state:AnalysisState) -> AnalysisState:
+    async def _execute_market_analysis(self, state:AnalysisState) -> AnalysisState:
         """Execute market analysis using Market Agent"""
         state["progress"] = 0.8
         state["current_step"] ="execute_market_analysis"
@@ -374,11 +448,17 @@ class DueDigillenceOrchestator:
             # Use LLM for data-driven investment recommendation
             recommendation = await self.generate_llm_recommendation(synthesis_context)
 
+            # Include memory insights in synthesis
+            memory_context = ""
+            if state.get("memory_insights"):
+                memory_context = self._format_memory_context(state["memory_insights"])
+
             synthesis = {
                 "company": state["company_ticker"],
                 "analysis_type": state["analysis_type"],
                 "executive_summary": executive_summary,
                 "key_findings": key_findings,
+                "cross_analysis_insights": state.get("memory_insights", {}),
                 "risk_assessment": risk_assessment,
                 "recommendation": recommendation,
                 "supporting_evidence": self._extract_supporting_evidence(state),
@@ -394,8 +474,8 @@ class DueDigillenceOrchestator:
             state["errors"].append(f"Synthesis failed: {str(e)}")
             state["synthesis_report"] = {"error": str(e)}
             
-        return state
-    
+        return state 
+       
     async def _generate_llm_executive_summary(self, context: Dict) -> str:
         """Generate professional executive summary using LLM"""
         prompt = f"""
@@ -511,6 +591,38 @@ class DueDigillenceOrchestator:
             response_format = {"type": "json_object"}
         )
         return json.loads(response.choices[0].message.content)
+    
+    def _format_memory_context(self, memory_insights: Dict) -> str:
+        """Format memory insights for LLM context"""
+        context_parts = []
+
+        if memory_insights.get("financial_patterns"):
+            context_parts.append(f"SIMILAR FINANCIAL PATTERNS FROM PREVIOUS ANALYSES:")
+            for pattern in memory_insights["financial_patterns"]:
+                context_parts.append(f"- {pattern['company']}: {pattern['insight']}")
+
+        if memory_insights.get("legal_risks"):
+            context_parts.append(f"RELEVANT LEGAL RISKS FROM SIMILAR COMPANIES:")
+            for risk in memory_insights["legal_risks"]:
+                context_parts.append(f"-{risk['company']}: {risk['risk_type']} - {risk['description']}")
+        
+        return "\n".join(context_parts) if context_parts else "No relevant historical insights found."
+    
+    def _extract_risk_severity(self, risk_description: str) -> str:
+        """Extract risk severity from risk description text"""
+        risk_lower = risk_description.lower()
+
+        if (any(word in risk_lower for word in ["critical", "severe", "major", "high risk", "urgent"])):
+            return "high"
+        
+        elif (any(word in risk_lower for word in ["moderate", "medium", "potential", "could"])):
+            return "medium"
+        
+        elif (any(word in risk_lower for word in ["minor", "low", "minimal", "slight"])):
+               return "low"
+        
+        else:
+            return "medium" # Default
 
     def _prepare_synthesis_llm_context(self, state: AnalysisState) -> Dict[str, Any]:
         """Prepare comprehensive context for LLM synthesis"""

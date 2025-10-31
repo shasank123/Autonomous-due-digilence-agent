@@ -3,7 +3,8 @@ import os
 import asyncio
 import logging
 import math
-from typing import Dict, List, Optional, Any
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any, Tuple
 from langchain_core.documents import Document
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.teams import RoundRobinGroupChat
@@ -25,9 +26,22 @@ class FinancialAgentTeam:
         self.sec_collector = SECDataCollector()
         self.document_parser = DocumentProcessor()
         self.team = None
-        self.logger = logging.getLogger(__name__)
+        self.logger = self._setup_logging()
         self._create_agents()
         self._create_team()
+
+    def _setup_logging(self) -> logging.Logger:
+        """Setup structured logging for production"""
+        logger = logging.getLogger(f"FinancialAgentTeam")
+        if not logger.handlers:
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - [%(funcName)s] - %(message)s'
+            )
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+        return logger
 
     def _create_agents(self):
         """Financial Due Diligence Agent Team integrated with our RAG system"""
@@ -183,7 +197,7 @@ class FinancialAgentTeam:
             self.logger.error(f"Financial metrics retrieval failed for {company}: {e}")
             return f"❌ System error retrieving financial metrics: {str(e)}"
         
-    def _extract_metric_data(self, scored_documents: List[tuple], metric: str, company: str) -> str:
+    def _extract_metric_data(self, scored_documents: List[Tuple], metric: str, company: str) -> str:
         """Extract and validate metric data from documents"""
         try:
             period_data = {}
@@ -684,6 +698,648 @@ class FinancialAgentTeam:
         }
 
         return metric_map.get(metric, metric)
+    
+    async def validate_with_source_data(self, company: str, findings: str) -> str:
+         """Validate analysis findings against source SEC data with confidence scoring"""
+         try:
+             # Input validation
+             if not company or not company.strip():
+                 return "❌ Company ticker is required for validation"
+             if not findings or len(findings.strip()) < 10:
+                 return "❌ Findings must contain meaningful content for validation"
+             
+             company = company.upper.strip()
+             self.logger.info(f"Validating findings for {company}: {findings[:100]}...")
+
+             # Use similarity search with scores for quality validation
+             scored_documents = self.rag_system.query_with_similarity_scores(
+                 question=findings,
+                 company=company,
+                 k=10,
+                 score_threshold=0.3  # Lower threshold to catch potential conflicts
+
+             )
+
+             if not scored_documents:
+                 self.logger.warning(f"No source documents found for validation of {company}")
+                 return f"⚠️ No source documents found for {company} to validate findings"
+             
+             # Analyze document relevance and conflicts
+             validation_results = self._analyze_financial_validation(scored_documents, findings, company)
+             return self._format_validation_report(validation_results, company, len(scored_documents))
+         
+         except Exception as e:
+             self.logger.error(f"Validation failed for {company}: {e}")
+             return f"❌ System error during validation: {str(e)}"
+         
+    def _analyze_findings_validation(self, scored_documents: List[Tuple], findings: str, company: str) -> Dict[str, Any]:
+        """Analyze document relevance and conflicts with findings"""
+        supporting_docs = []
+        conflicting_docs = []
+        neutral_docs = []
+
+        findings_terms = self._extract_key_terms(findings)
+
+        for doc, score in scored_documents:
+            try:
+                relevance_score = self._calculate_relevance_score(doc.page_content, findings_terms)
+                doc_type = doc.metadata.get('doc_type', 'unknown')
+                metric = doc.metadata.get('metric', 'unknown')
+
+                validation_doc = {
+                    'content_preview': doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
+                    'similarity_score': score,
+                    'relevance_score': relevance_score,
+                    'doc_type': doc_type,
+                    'metric': metric,
+                    'confidence': min(score, relevance_score) # Combined confidence
+
+                }
+
+                # Categorize based on relevance
+                if relevance_score >= 0.7:
+                    supporting_docs.append(validation_doc)
+                elif relevance_score <= 0.3:
+                    conflicting_docs.append(validation_doc)
+                else:
+                    neutral_docs.append(validation_doc)
+
+            except Exception as doc_error:
+                self.logger.warning(f"Document analysis failed: {doc_error}")
+                continue
+
+        return {
+            'supporting': sorted(supporting_docs, key= lambda x:x['confidence'], reverse=True),
+            'conflicting': sorted(conflicting_docs, key= lambda x:x['conflicting'], reverse=True),
+            'neutral': neutral_docs,
+            'total_analyzed': len(scored_documents)
+        }    
+    
+    def _extract_key_terms(self, text: str) -> List[str]:
+        """Extract meaningful key terms from findings"""
+        try:
+            # Remove common stop words and short terms
+            stop_words = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by']
+            words = text.lower().split()
+            key_terms = [
+                word.strip('.,!?;:()[]{}"\'') 
+                for word in words
+                if len(word) > 3 and word not in stop_words                
+            ]
+            return list(set(key_terms))[:15] # Return top 15 unique terms
+        
+        except Exception as e:
+            self.logger.warning(f"Key term extraction failed: {e}")
+            return []
+        
+    def _calculate_relevance_score(self, content: str, key_terms: List[str]) -> float:
+        """Calculate relevance score between content and key terms"""
+        
+        if not key_terms:
+            return 0.0
+        
+        content_lower = content.lower()
+        matches = sum(1 for term in key_terms if term in content_lower)
+        # Normalize score between 0 and 1
+        return min(matches/len(key_terms), 1.0)
+    
+    def _format_validation_report(self, validation_results: Dict[str, Any], company: str, total_docs: int) -> str:
+        """Format comprehensive validation report"""
+        supporting = validation_results['supporting']
+        conflicting = validation_results['conflicting']
+        neutral = validation_results['neutral']
+
+        report_parts = [f"📋 Validation Report for {company}"]
+        report_parts.append(f"Analyzed {total_docs} source documents")
+        report_parts.append("")
+
+        # Supporting evidence
+        if supporting:
+            report_parts.append(f"✅ Supporting Evidence ({len(supporting)} documents):")
+            for doc in supporting[:3]:
+                report_parts.append(
+                    f"  • {doc['metric']} (Confidence: {doc['confidence']:.2f})"
+                )
+        else:
+            report_parts.append("✅ No strong supporting evidence found")
+
+        # Potential conflicts
+        if conflicting:
+            report_parts.append(f"")
+            report_parts.append(f"⚠️  Potential Conflicts ({len(conflicting)} documents:)")
+            
+            for doc in conflicting[:2]:
+                report_parts.append(
+                    f" • {doc['metric']} (Confidence: {doc['confidence']:.2f})"
+                )
+
+        # Neutral documents
+        if neutral and not supporting and not conflicting:
+            report_parts.append(f"")
+            report_parts.append(f"📊 Neutral Documents ({len(neutral)}):")
+            report_parts.append(f"• Findings cannot be strongly validated or contradicted")
+
+        # Overall assessment
+        report_parts.append("")
+        if supporting and not conflicting:
+            report_parts.append(f"🎯 Assessment: Findings are well-supported by source data")
+        elif conflicting and not supporting:
+            report_parts.append(f"🎯 Assessment: Findings conflict with source data - review needed")
+        elif supporting and conflicting:
+            report_parts.append(f"🎯 Assessment: Mixed evidence - further analysis recommended")
+        else:
+            report_parts.append(f"🎯 Assessment: Insufficient evidence for validation")
+
+        return "\n".join(report_parts)
+    
+    async def _generate_investment_summary(self, company: str) -> str:
+        """Generate data-driven investment summary with risk assessment"""
+        try:
+            if not company or not company.strip():
+                return f"❌ Company ticker is required for investment summary"
+            
+            company = company.upper().strip()
+            self.logger.info(f"Generating investment summary for {company}")
+
+            # Get comprehensive data with quality filtering
+            scored_documents = self.rag_system.query_with_similarity_scores(
+                question=f"{company} financial performance risk assessment outlook",
+                company=company,
+                k=20, # More documents for comprehensive analysis
+                score_threshold=0.4
+            )
+
+            if not scored_documents:
+                return f"❌ Insufficient data available for {company} investment analysis"   
+            
+            # Analyze data quality and categories
+            analysis_results = self._analyze_investment_data(scored_documents, company)
+
+            if not analysis_results['has_sufficient_data']:
+                return f"⚠️ Limited data available for {company}. Consider fetching latest SEC filings."
+            
+            return self._generate_comprehensive_summary(analysis_results, company)
+        
+        except Exception as e:
+            self.logger.error(f"Investment summary generation failed for {company}: {e}")
+            return f"❌ System error generating investment summary: {str(e)}"
+        
+    def _analyze_investment_data(self, scored_documents: List[Tuple], company: str) -> Dict[str, Any]:
+        """Analyze investment data across categories"""
+        categories = {
+            'profitability': [],
+            'liquidity': [],
+            'solvency': [],
+            'efficiency': [],
+            'growth': [],
+            'risk': []
+        }   
+
+        high_confidence_documents = 0
+
+        for doc, score in scored_documents:
+            try:
+                doc_type = doc.metadata.get('doc_type')
+                metric = doc.metadata.get('metric')
+
+                doc_info = {
+                    'content': doc.page_content,
+                    'score': score,
+                    'doc_type': doc_type,
+                    'metric': metric
+                }
+
+                # Categorize document
+                category = self._categorize_investment_document(doc_info)
+                if category:
+                    categories[categories].append(doc_info)
+
+                # Track high confidence documents
+                if score >= 0.7:
+                    high_confidence_documents +=1
+
+            except Exception as doc_error:
+                self.logger.warning(f"Document categorization failed: {doc_error}")
+                continue
+
+        return {
+            'categories': categories,
+            'total_documents': len(scored_documents),
+            'high_confidence_docs': high_confidence_documents,
+            'has_sufficient_data': len(high_confidence_documents) >= 5 and any(len(docs) >= 2 for docs in categories.values())
+        }
+    
+    def _categorize_investment_document(self, doc_info: Dict[str, Any]) -> Optional[str]:
+        """Categorize document for investment analysis"""
+        content_lower = doc_info['content'].lower()
+        metric_lower = doc_info['metric'].lower()
+
+        # Profitability indicators
+        if any(term in content_lower or term in metric_lower for term in ['revenue', 'income', 'profit', 'margin', 'roa', 'roe']):
+            return 'profitability'
+        
+        # Liquidity indicators
+        elif any(term in content_lower or term in metric_lower for term in ['current', 'quick', 'liquidity', 'cash']):
+            return 'liquidity'
+        
+        # Solvency indicators
+        elif any(term in content_lower or term in metric_lower for term in ['debt', 'equity', 'leverage', 'solvency']):
+            return 'solvency'
+        
+        # Efficiency indicators
+        elif any(term in content_lower or term in metric_lower for term in ['turnover', 'efficiency', 'asset']):
+            return 'efficiency'
+        
+        # Growth indicators
+        elif any(term in content_lower or term in metric_lower for term in ['growth', 'trend', 'increase', 'decrease']):
+            return 'growth'
+        
+        # Risk indicators
+        elif any(term in content_lower or term in metric_lower for term in ['risk', 'volatility', 'uncertainty']):
+            return 'risk'
+        
+        return None
+    
+    def _generate_comprehensive_summary(self, analysis_results: Dict[str, Any], company: str) -> str:
+        """Generate comprehensive investment summary"""
+        categories = analysis_results['categories']
+
+        summary_parts = [
+            f"🏢 Comprehensive Investment Analysis: {company}",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Data Quality: {analysis_results['high_confidence_documents']}/{analysis_results['total_documents']} high-confidence documents",
+            ""
+        ]
+
+        # Data availability overview
+        available_categories = [cat for cat, docs in categories.items() if docs]
+        summary_parts.append(f"📊 Data Availability:")
+        
+        for category in available_categories:
+            doc_count = len(categories[category])
+            summary_parts.append(f"• {category.title()}: {doc_count} documents")
+        
+        summary_parts.append("")
+
+        # Analysis recommendations
+        summary_parts.append("🎯 Recommended Analysis Focus:")
+
+        if categories['profitability']:
+            summary_parts.append(f"• Analyze profitability trends and margins")
+        if categories['liquidity']:
+            summary_parts.append("  • Assess short-term financial health and liquidity")           
+        if categories['solvency']:
+            summary_parts.append("  • Evaluate long-term debt and capital structure")
+        if categories['growth']:
+            summary_parts.append("  • Examine revenue and income growth patterns")
+               
+        summary_parts.append("")
+
+        # Risk assessment
+        risk_docs = len(categories['risk'])
+        
+        if risk_docs > 0:
+            summary_parts.append(f"⚠️  Risk Considerations: {risk_docs} risk-related documents identified")
+        else:
+            summary_parts.append(f"✅ No specific risk documents identified - conduct standard risk assessment")
+       
+        summary_parts.append("")
+        
+        # Next steps
+        summary_parts.append("🚀 Next Steps:")
+        summary_parts.append("  1. Use financial metrics tools for detailed analysis")
+        summary_parts.append("  2. Calculate and interpret key financial ratios")
+        summary_parts.append("  3. Validate findings against source SEC data")
+        summary_parts.append("  4. Generate final investment recommendation")
+
+        return "\n".join(summary_parts)
+    
+    def _create_team(self):
+        """Create the financial team with robust termination conditions"""
+
+        # Comprehensive termination conditions
+        termination_conditions = (
+            TextMentionTermination("ANALYSIS_COMPLETE")|
+            TextMentionTermination("REVIEW_COMPLETE")|
+            TextMentionTermination("RESEARCH_COMPLETE")|
+            TextMentionTermination("TERMINATE")|
+            MaxMessageTermination(max_messages=30)
+        )
+
+        self.team = RoundRobinGroupChat(
+            [self.financial_researcher, self.financial_analyst, self.financial_reviewer],
+            termination_condition=termination_conditions,
+            max_turns=25           
+        )
+
+    async def analyze_company(self, company_ticker: str, additional_context: str = "") -> Dict[str, Any]:
+        """Run comprehensive financial due diligence with production-grade error handling"""
+        try:
+            # Input validation
+            if not company_ticker or not company_ticker.strip():
+                return self._create_error_result("Company ticker is required")
+            
+            company_ticker = company_ticker.upper().strip()
+
+            # Ensure data availability
+            data_available = self._ensure_company_data(company_ticker)
+            if not data_available:
+                return self._create_error_result(f"Insufficient data available for {company_ticker}")
+            
+            self.logger.info(f" Starting financial analysis for {company_ticker}")
+
+            # Build comprehensive task with context
+            task = self._build_analysis_task(company_ticker, additional_context)
+
+            # Execute analysis with timeout protection
+            try:
+                result = await asyncio.wait_for(
+                    self.team.run(task=task),
+                    timeout=300 # 5-minute timeout
+                )
+            except asyncio.TimeoutError:
+                self.logger.error(f"Analysis timeout for {company_ticker}")
+                return self._create_error_result(f"Analysis timeout - process took too long")
+            
+            # Process and validate results
+            analysis_result = self._process_analysis_result(result, company_ticker)
+            self.logger.info(f"Successfully completed analysis for {company_ticker}")
+            return analysis_result
+        
+        except Exception as e:
+            self.logger.error(f"Financial analysis failed for {company_ticker}: {e}")
+            return self._create_error_result(f"Analysis failed: {str(e)}")
+        
+    def build_analysis_task(self, company: str, additional_context: str) -> str:
+        """Build comprehensive analysis task with context"""
+
+        base_task = f"""
+        Perform comprehensive financial due diligence for {company} using our SEC data pipeline.
+
+        **Data Sources Available:**
+        - SEC financial metrics (Revenue, Net Income, Assets, Liabilities, Equity)
+        - Calculated financial ratios (ROA, ROE, Current Ratio, Debt-to-Equity)
+        - Company business information and entity data
+        - Multi-period financial data for trend analysis
+
+        **Analysis Framework:**
+        1. RESEARCH: Retrieve and validate SEC financial metrics
+        2. ANALYSIS: Calculate and interpret financial ratios and trends
+        3. REVIEW: Validate findings and generate data-driven recommendations
+
+        **Quality Requirements:**
+        - Cross-validate all findings with source SEC data
+        - Consider multiple periods for trend analysis
+        - Assess both strengths and risks
+        - Provide specific, actionable recommendations
+
+        **Additional Context:** {additional_context or "Standard comprehensive analysis"}
+
+        Coordinate as a team and ensure thorough documentation of the analysis process.
+        """
+        return base_task.strip()
+    
+    def _process_analysis_result(self, result, company: str) -> Dict[str, Any]:
+        """Process and validate analysis results"""
+        try:
+            summary = self._extract_meaningful_summary(result.messages)
+
+            return {
+                'company': company,
+                'messages': [msg.to_dict() for msg in result.messages],
+                'stop_reason': result.stop_reason,
+                'summary': summary,
+                'rag_integration': True,
+                'data_source': 'SEC EDGAR API + Production RAG',
+                'time_stamp': datetime.now(timezone.utc).isoformat(),
+                'message_count': len(result.messages),
+                'success': True
+
+            }
+        
+        except Exception as e:
+            self.logger.error(f"Result processing failed for {company}: {e}")
+            return self._create_error_result(f"Result processing failed: {str(e)}")
+        
+    def _extract_meaningful_summary(self, messages) -> str:
+         """Extract meaningful summary from team messages with quality checks"""
+         try:
+             # Prioritize reviewer messages, then analyst, then researcher
+             for source in ['financial_reviewer', 'financial_analyst', 'financial_researcher']:
+                 for msg in reversed(messages):
+                     if hasattr(msg, 'source') and msg.source == source and hasattr(msg, 'content'):
+                        content = msg.content.strip()
+                        if len(content) > 50 and any(keyword in content.lower() for keyword in ['recommend', 'conclusion', 'summary', 'assessment']):
+                            return f" {source}: {content[:500]}..."
+                        
+             # Fallback: find most substantial message
+             substantial_messages = []
+             for msg in messages:
+                 if hasattr(msg, 'content') and len(msg.content.strip()) > 100:
+                     substantial_messages.append(msg.source, msg.content)
+
+             if substantial_messages:
+                 source, content = substantial_messages[-1] # Get last substantial message
+                 return f" {source}: {content[:400]}"
+             
+             return "Analysis completed - review detailed messages for complete assessment"
+         
+         except Exception as e:
+             self.logger.warning(f"Summary extraction failed: {e}")
+             return "Analysis completed - summary extraction unavailable"
+
+    def _create_error_message(self, error_message: str) -> Dict[str, Any]:
+        """Create standardized error result"""
+        return {
+            'company': 'UNKNOWN',
+            'error': error_message,
+            'rag_integration': False,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'success': False
+        }   
+
+    async def ensure_company_data(self, company: str) -> bool:
+        """Ensure company data is available with production-grade error handling"""
+        try:
+            if not company or not company.strip():
+                self.logger.error(f"Company ticker required for data assurance")
+                return False
+            
+            company = company.upper().strip()
+
+            # Check existing data with quality assessment
+            metrics = self.rag_system.get_company_metrics(company)
+            if metrics and len(metrics) > 5:
+                self.logger.info(f"Company data verified for {company}: {len(metrics)} metrics")
+                return True
+            
+            # Fetch and process new data
+            self.logger.info(f"Fetching SEC data for {company}")
+
+            company_data = self.sec_collector.company_facts(company)
+            if not company_data:
+                self.logger.error(f"SEC data fetch failed for {company}")
+                return False
+            
+            documents = self.document_parser.process_sec_facts(company_data, company)
+            if not documents or len(documents) < 3: # Require minimum documents
+                self.logger.error(f"Insufficient documents processed for {company}")
+                return False
+            
+            doc_ids = self.rag_system.add_company_data(documents)
+            if not doc_ids or len(doc_ids) < 3:
+                self.logger.error(f"RAG storage failed for {company}")
+                return False
+
+            self.logger.info(f"Successfully added {len(doc_ids)} documents for {company}")
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Data assurance failed for {company}")
+            return False
+        
+    async def close(self):
+        """Clean up resources with proper error handling"""
+        try:
+            if hasattr(self, 'model_client'):
+                await self.model_client.close()
+            self.logger.info("Financial agent team resources cleaned up")
+        
+        except Exception as e:
+            self.logger.error(f"Error during cleanup: {e}")
+
+
+
+# Production-grade factory function
+async def create_financial_team(
+        model: str = "gpt-4o",
+                api_key: Optional[str] = None,
+                rag_system: Optional[ProductionRAGSystem] = None,
+                timeout: int = 30
+) -> FinancialAgentTeam:
+    """Create production-grade financial agent team with comprehensive setup"""
+    try:
+        # Environment variable fallback with validation
+        if not api_key:
+            api_key = os.getenv("OPEN_AI_KEY")
+        
+        if not api_key:
+            raise ValueError(
+                "OpenAI API key required. "
+                "Set OPENAI_API_KEY environment variable or pass api_key parameter."
+            )
+        
+        # Initialize RAG system with production settings
+        if not rag_system:
+            rag_system = ProductionRAGSystem(
+                persist_directory="./data/vector_stores/financial_data",
+                embedding_type="huggingface",
+                chunk_size=800,
+                chunk_overlap=100
+            )
+
+        # Configure model client for production use
+        model_client = OpenAIChatCompletionClient(
+            model=model,
+            api_key=api_key,
+            seed=42, # For reproducibility
+            temperature=0.1,
+            timeout=timeout,
+            max_retries=3
+        )
+
+        return FinancialAgentTeam(model_client, rag_system)
+
+    except Exception as e:
+        logging.error(f"Failed to create financial agent team: {e}")
+        raise
+
+# Production-ready main execution
+async def main():
+    """Production-grade example usage"""
+
+    # Configure logging for production
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+
+    financial_team = None
+    try:
+        # Create financial agent team
+        financial_team = await create_financial_team()  
+
+        # Test with a company
+        company = "AAPL"
+
+        # Ensure data availability
+        data_ready = await financial_team.ensure_company_data(company)
+        if not data_ready:
+            print(f"❌ Cannot analyze {company} - data unavailable")
+            return
+
+        # Run comprehensive analysis
+        result = await financial_team.analyze_company(
+            company_ticker=company,
+            additional_context="Focus on profitability, growth trends, and risk assessment"
+        ) 
+
+        # Display results
+        if result.get('success'):
+            print(f"✅ Analysis completed for {result['company']}")
+            print(f"📊 Summary: {result['summary']}")
+            print(f"⏱️  Timestamp: {result['timestamp']}")
+            print(f"📝 Messages: {result['message_count']}")
+
+        else:
+            print(f"❌ Analysis failed: {result.get('error', 'unknown error')}")   
+
+    except Exception as e:
+        logging.error(f"Main execution failed: {e}")
+
+    finally:
+        if financial_team:
+            await financial_team.close()      
+
+if __name__ == "__main__":
+    asyncio.run(main())    
+     
+            
+        
+    
+        
+            
+
+
+             
+                    
+    
+          
+          
+
+
+
+
+        
+
+
+            
+
+
+        
+              
+
+
+
+    
+
+            
+
+
+
+        
+    
+
 
     
 

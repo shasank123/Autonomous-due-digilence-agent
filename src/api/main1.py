@@ -1,454 +1,412 @@
 # src/api/main.py (Enhanced with Agent Integration)
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Query
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
-from typing import Dict, Any, List, Optional
+import asyncio
+import os
 import uuid
 import logging
 import time
-from datetime import datetime
-import asyncio
+from typing import Dict, List, Optional, Any
+from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+from enum import Enum
+import regex
 import json
 
-from src.core.config import settings
-from src.agents.orchestrator import DueDiligenceOrchestrator
+from fastapi import FastAPI, BackgroundTasks, Depends, requests, status, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field, field_validator
+import uvicorn
+from dotenv import load_dotenv
+import redis.asyncio as redis
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import prometheus_client
+from prometheus_client import Histogram, Counter, Gauge
 
-# Configure logging
+# Load environment variables
+load_dotenv()
+
+# Configure structured logging
 logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('logs/api.log')
+    ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("due_digilence_api")
 
-# Enhanced Request/Response Models
-class DueDiligenceRequest(BaseModel):
-    company_ticker: str = Field(..., min_length=1, max_length=10, regex="^[A-Z]+$")
-    analysis_type: str = Field(default="comprehensive", regex="^(comprehensive|financial|legal|market)$")
-    questions: List[str] = Field(default_factory=list)
-    user_id: Optional[str] = None
-    priority: str = Field(default="normal", regex="^(low|normal|high)$")
-    
-    @validator('company_ticker')
-    def ticker_uppercase(cls, v):
-        return v.upper()
+# Import our project components
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__),'..'))
 
-class AnalysisResponse(BaseModel):
-    request_id: str
-    status: str = Field(..., regex="^(initialized|running|completed|failed)$")
-    progress: float = Field(..., ge=0.0, le=1.0)
-    estimated_completion: Optional[str] = None
-    results: Dict[str, Any] = Field(default_factory=dict)
-    error: Optional[str] = None
-    timestamp: str
-    current_step: Optional[str] = None
+try:
+    from agents.financial_analyst import FinancialAgentTeam, create_financial_team
+    from rag.core import ProductionRAGSystem
+    from data.collectors.sec_edgar import SECDataCollector
+    from data.collectors.company_resolver import CompanyResolver
+    from data.processors.document_parser import DocumentProcessor
+    from agents.orchestrator import DueDigillenceOrchestator
 
-class HealthResponse(BaseModel):
-    status: str
-    timestamp: str
-    version: str
-    ongoing_analyses: int
-    components: Dict[str, Any]
+except ImportError as e:
+    logger.error(f"Failed to import project modules {e}")
+    raise
 
-# FastAPI App
-app = FastAPI(
-    title="Autonomous Due Diligence API",
-    description="AI-powered multi-agent due diligence system with AutoGen",
-    version="2.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+# Prometheus metrics
+REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
+REQUEST_DURATION = Histogram('api_request_duration_seconds', 'API request duration')
+ACTIVE_ANALYSES = Gauge('active_analyses', 'Number of active analyses')
+SESSION_COUNT = Gauge('analysis_sessions_total', 'Total analysis sessions')
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
 
-# Global State with Enhanced Tracking
-class AnalysisState:
+# Global components with proper error handling
+class ComponentStatus(Enum):
+    INITIALIZING = "initializing"
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    FAILED = "failed"
+
+class SystemComponents:
     def __init__(self):
-        self.ongoing_analyses: Dict[str, Dict] = {}
-        self.completed_analyses: Dict[str, Dict] = {}
-        self.orchestrator = DueDiligenceOrchestrator()
-        self.start_time = datetime.utcnow()
+        self.financial_agent_team : Optional[FinancialAgentTeam] = None
+        self.rag_system : Optional[ProductionRAGSystem] = None
+        self.orchestator : Optional[DueDigillenceOrchestator] = None
+        self.sec_collector: Optional[SECDataCollector] = None
+        self.company_resolver: Optional[CompanyResolver] = None
+        self.document_processor: Optional[DocumentProcessor] = None
+        self.status : Dict[str, ComponentStatus] = {}
+        self.redis_client : Optional[redis.Redis] = None
 
-state = AnalysisState()
+components = SystemComponents()
 
-# Dependency Injection
-async def get_orchestrator():
-    return state.orchestrator
-
-# Enhanced Middleware
-@app.middleware("http")
-async def log_requests(request, call_next):
-    request_id = str(uuid.uuid4())
-    start_time = time.time()
-    
-    logger.info(f"Request {request_id}: {request.method} {request.url.path}")
-    
-    response = await call_next(request)
-    process_time = time.time() - start_time
-    
-    logger.info(f"Request {request_id} completed in {process_time:.2f}s - Status: {response.status_code}")
-    
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = str(process_time)
-    
-    return response
-
-# Enhanced Routes
-@app.post("/analyze", response_model=AnalysisResponse)
-async def analyze_company(
-    request: DueDiligenceRequest,
-    background_tasks: BackgroundTasks,
-    orchestrator: DueDiligenceOrchestrator = Depends(get_orchestrator)
-):
-    """Main endpoint for due diligence analysis with enhanced validation"""
+# Redis connection for session storage
+async def _init_redis():
     try:
-        request_id = str(uuid.uuid4())
-        
-        # Enhanced validation
-        validation_result = await _validate_analysis_request(request)
-        if not validation_result["valid"]:
-            raise HTTPException(status_code=400, detail=validation_result["error"])
-        
-        # Initialize analysis state with enhanced tracking
-        state.ongoing_analyses[request_id] = {
-            "status": "initialized",
-            "progress": 0.0,
-            "start_time": datetime.utcnow(),
-            "request": request.dict(),
-            "current_step": "initialization",
-            "last_update": datetime.utcnow(),
-            "retry_count": 0
-        }
-        
-        # Start background analysis with error handling
-        background_tasks.add_task(
-            _run_analysis_pipeline_with_retry,
-            request_id,
-            request,
-            orchestrator
+        components.redis_client = await redis.Redis(
+            host = os.getenv('REDIS_HOST', 'localhost' )
+            port = int(os.getenv('REDIS_PORT', 6039))
+            password= os.getenv('REDIS_PASSWORD')
+            decode_responses=True
+            socket_connect_timeout=5
+            socket_timeout=5
+            retry_on_timeout=True
         )
-        
-        logger.info(f"Analysis initialized: {request_id} for {request.company_ticker}")
-        
-        return AnalysisResponse(
-            request_id=request_id,
-            status="initialized",
-            progress=0.0,
-            estimated_completion=_estimate_completion_time(request.analysis_type),
-            timestamp=datetime.utcnow().isoformat(),
-            current_step="initialization"
-        )
-        
-    except HTTPException:
-        raise
+        await components.redis_client.ping()
+        logger.info("✅ Redis connection established")
+        components.status['redis'] = ComponentStatus.HEALTHY
+    
     except Exception as e:
-        logger.error(f"Analysis initialization failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error during analysis initialization")
+        logger.error(f"❌ Redis connection failed: {e}")
+        components.status['redis'] = ComponentStatus.FAILED
+        components.redis_client = None
 
-@app.get("/analysis/{request_id}", response_model=AnalysisResponse)
-async def get_analysis_status(request_id: str):
-    """Get status of ongoing analysis with enhanced error handling"""
-    try:
-        if request_id in state.ongoing_analyses:
-            analysis = state.ongoing_analyses[request_id]
-        elif request_id in state.completed_analyses:
-            analysis = state.completed_analyses[request_id]
-        else:
-            raise HTTPException(status_code=404, detail="Analysis not found")
-        
-        return AnalysisResponse(
-            request_id=request_id,
-            status=analysis["status"],
-            progress=analysis["progress"],
-            results=analysis.get("results", {}),
-            error=analysis.get("error"),
-            timestamp=analysis.get("timestamp", datetime.utcnow().isoformat()),
-            current_step=analysis.get("current_step")
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Status retrieval failed for {request_id}: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+# Pydantic models with comprehensive validation
+class AnalysisType(str, Enum):
+    COMPREHENSIVE = "comprehensive"
+    FINANCIAL = "financial"
+    QUICK = "quick"
+    CUSTOM = "custom"
 
-@app.get("/health", response_model=HealthResponse)
-async def health_check():
-    """Comprehensive health check with component status"""
-    try:
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "version": "2.0.0",
-            "ongoing_analyses": len(state.ongoing_analyses),
-            "components": {
-                "orchestrator": state.orchestrator.is_healthy(),
-                "uptime": str(datetime.utcnow() - state.start_time),
-                "memory_usage": _get_memory_usage(),
-                "system_load": _get_system_load()
-            }
-        }
-        
-        # Check if any component is unhealthy
-        if not all(health_status["components"].values()):
-            health_status["status"] = "degraded"
-            
-        return health_status
-        
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        return HealthResponse(
-            status="unhealthy",
-            timestamp=datetime.utcnow().isoformat(),
-            version="2.0.0",
-            ongoing_analyses=len(state.ongoing_analyses),
-            components={"error": str(e)}
-        )
+class AnalysisRequest(BaseModel):
+    company_ticker: str = Field(..., min_length=1, max_length=10, description="Company stock ticker symbol")
+    analysis_type: AnalysisType = Field(default=AnalysisType.COMPREHENSIVE)
+    additional_context: Optional[str] = Field(default= None, max_length=1000)
+    priority: str = Field(default="normal", regex="^(low|normal|high|urgent)$")
+    timeout_seconds: int = Field(default=300, ge=60, le=1000)
 
-@app.get("/analyses")
-async def list_analyses(
-    status: Optional[str] = Query(None, regex="^(initialized|running|completed|failed)$"),
-    limit: int = Query(50, ge=1, le=1000)
-):
-    """List analyses with filtering and pagination"""
-    try:
-        all_analyses = {**state.ongoing_analyses, **state.completed_analyses}
-        
-        if status:
-            filtered = {k: v for k, v in all_analyses.items() if v.get("status") == status}
-        else:
-            filtered = all_analyses
-        
-        # Sort by start time (most recent first)
-        sorted_analyses = sorted(
-            filtered.items(),
-            key=lambda x: x[1].get("start_time", datetime.min),
-            reverse=True
-        )[:limit]
-        
+    @field_validator('company_ticker')
+    def validate_ticker(cls, v):
+        if not v.isalphanum():
+            raise ValueError('Ticker must be alphanumeric')
+        return v.upper()
+    
+class AnalysisResponse(BaseModel):
+    company: str
+    session_id: str
+    status: str
+    progress: int = Field(ge=0,le=100)
+    estimated_completion: Optional[str] = None
+    message: str
+    created_at: str
+    queue_position: Optional[int] = None
+
+class AnalysisResult(BaseModel):
+    session_id: str
+    company: str
+    status: str
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    warnings: List[str] = []
+    timestamp: str
+    processing_time: Optional[float] = None
+    data_quality_score: Optional[float] = Field(None, ge=0, le=1)
+
+class CompanySearchRequest(BaseModel):
+    query : str = Field(..., min_length=0, max_length=50, description="Company name or ticker to search")
+    max_results: int = Field(default=10,ge=1, le=50)
+
+class CompanySearchResponse(BaseModel):
+    results: List[Dict[str, str]]
+    total_count: int
+    search_duration: float
+
+class SystemHealth(BaseModel):
+    status: str
+    components: Dict[str, str]
+    timestamp: str
+    version: str = "1.0.0"
+    uptime: float
+    active_sessions: int
+
+class ErrorResponse(BaseModel):
+    error: str
+    detail: Optional[str] = None
+    session_id: Optional[str] = None
+    timestamp: str
+
+# Custom exception handlers
+class AnalysisError(Exception):
+    def __init__(self, message: str, session_id: str = None, status_code: int = 500):
+        self.message = message
+        self.session_id = session_id
+        self.status_code = status_code
+        super().__init__(self.message)
+
+class CompanyNotFoundError(AnalysisError):
+    def __init__(self, company: str):
+        super().__init__(f" Company not found: {company}", status_code=404)
+
+class RateLimitError(AnalysisError):
+    def __init__(self, message: str = "Rate limit exceeded"):
+        super().__init__(message, status_code=429)
+
+# Session management
+class AnalysisSession:
+    def __init__(self, session_id: str, company: str, analysis_type: str):
+        self.company = company
+        self.session_id = session_id
+        self.analysis_type = analysis_type
+        self.status = "pending"
+        self.progress = 0
+        self.created_at = datetime.now(timezone.utc).isoformat()
+        self.started_at: Optional[datetime] = None
+        self.completed_at: Optional[datetime] = None
+        self.result: Optional[Dict] = None 
+        self.error: Optional[str] = None
+        self.warnings: List[str] = []
+        self.progress_updates: List[Dict] = []
+    
+    def to_dict(self) -> Dict:
         return {
-            "analyses": [
-                {
-                    "request_id": k,
-                    "status": v.get("status"),
-                    "company": v.get("request", {}).get("company_ticker"),
-                    "start_time": v.get("start_time"),
-                    "progress": v.get("progress", 0.0)
-                }
-                for k, v in sorted_analyses
-            ],
-            "total": len(sorted_analyses)
+            "session_id": self.session_id,
+            "company": self.company,
+            "status": self.status,
+            "progress": self.progress,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "result": self.result,
+            "error": self.error,
+            "warnings": self.warnings
         }
-        
-    except Exception as e:
-        logger.error(f"List analyses failed: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
 
-# Enhanced Background Tasks
-async def _run_analysis_pipeline_with_retry(
-    request_id: str, 
-    request: DueDiligenceRequest, 
-    orchestrator: DueDiligenceOrchestrator,
-    max_retries: int = 3
-):
-    """Run analysis pipeline with retry logic"""
-    for attempt in range(max_retries):
+class RedisSessionManager:
+
+    """Production-grade session management using Redis"""
+
+    def __init__(self, redis_client: redis.Redis):
+        self.redis = redis_client
+        self.session_prefix = "analysis_session:"
+        self.default_ttl = 86400 # 24 hours in seconds
+
+    async def create_session(self, session_id: str, company: str, analysis_type: str):
+        """Create a new analysis session in Redis"""
+
+        session = AnalysisSession(session_id, company, analysis_type)
+        self._store_session(session)
+        return session
+    
+    async def get_session(self, session_id: str) -> Optional[AnalysisSession]:
+         """Retrieve session from Redis"""
+         try:
+             session_data = await self.redis.get(f"{self.session_prefix}{session_id}")
+             if not session_data:
+                 return None
+             
+             data_dict = json.loads(session_data)
+             return self._dict_to_session(data_dict)
+         
+         except (json.JSONDecodeError, KeyError) as e:
+             logger.error(f"Failed to decode session {session_id}: {e}")
+             return None
+         
+         except Exception as e:
+             logger.error(f"Redis error retrieving session {session_id}: {e}")
+             return None
+         
+    async def update_session(self, session: AnalysisSession) -> bool:
+        """Update session in Redis with error handling"""
         try:
-            await _run_analysis_pipeline(request_id, request, orchestrator)
-            break  # Success, break out of retry loop
+            await self._store_session(session)
+            return True
+        
         except Exception as e:
-            state.ongoing_analyses[request_id]["retry_count"] = attempt + 1
-            logger.warning(f"Analysis {request_id} attempt {attempt + 1} failed: {e}")
-            
-            if attempt == max_retries - 1:  # Final attempt failed
-                logger.error(f"Analysis {request_id} failed after {max_retries} attempts")
-                state.ongoing_analyses[request_id].update({
-                    "status": "failed",
-                    "error": f"Analysis failed after {max_retries} attempts: {str(e)}",
-                    "completion_time": datetime.utcnow()
+            logger.error(f"Failed to update session {session.session_id}: {e}")
+            return False
+        
+    async def update_progress(self, session_id: str, progress: int, message: str) -> bool:
+        """Update session progress atomically"""
+        try:
+            # Use Redis transaction for atomic update
+            async with self.redis.pipeline(transaction=True) as pipe:
+                session_data = await pipe.get(f"{self.session_prefix}{session_id}").execute()
+                if not session_data[0]:
+                    return  False
+                
+                data_dict = json.loads(session_data)
+                data_dict['progress'] = progress
+                data_dict['progress_updates'].append({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "progress": progress,
+                    "message": message
                 })
-                # Move to completed analyses
-                state.completed_analyses[request_id] = state.ongoing_analyses.pop(request_id)
-            else:
-                # Wait before retry
-                await asyncio.sleep(2 ** attempt)  # Exponential backoff
 
-async def _run_analysis_pipeline(request_id: str, request: DueDiligenceRequest, orchestrator: DueDiligenceOrchestrator):
-    """Enhanced analysis pipeline with progress tracking"""
-    try:
-        # Update status
-        state.ongoing_analyses[request_id].update({
-            "status": "running",
-            "progress": 0.1,
-            "current_step": "orchestration"
-        })
+                await pipe.setex(
+                    f"{self.session_prefix}{session_id}",
+                    self.default_ttl,
+                    json.dumps(data_dict)
+                ).execute()
+
+                logger.info(f"Updated progress for {session_id}: {progress}% - {message}")
+                return True
+            
+        except Exception as e:
+            logger.error(f"Progress update failed for {session_id}: {e}")
+            return False
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete session from Redis"""
+        try:
+            await self.redis.delete(f"{self.session_prefix}{session_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete session {session_id}: {e}")
+            return False
         
-        # Execute analysis with progress callback
-        def progress_callback(progress: float, step: str = None):
-            state.ongoing_analyses[request_id].update({
-                "progress": progress,
-                "current_step": step or state.ongoing_analyses[request_id].get("current_step"),
-                "last_update": datetime.utcnow()
-            })
+    async def cleanup_expired_sessions(self) -> int:
+        """Clean up sessions older than TTL (Redis handles automatically)"""
+        # Redis automatically expires sessions due to TTL
+        # This is just for manual cleanup if needed
+        return 0
+    
+    async def get_active_sessions_count(self) -> int:
+        """Get count of active analysis sessions"""
+        try:
+            # Use SCAN instead of KEYS for production (non-blocking)
+            count = 0
+            async for key in self.redis.scan_iter(f"{self.session_prefix}*"):
+                count+=1
+            return count
         
-        results = await orchestrator.execute_analysis(
-            request_id=request_id,
-            company_ticker=request.company_ticker,
-            analysis_type=request.analysis_type,
-            questions=request.questions,
-            user_id=request.user_id,
-            update_progress_callback=progress_callback
+        except Exception as e:
+            logger.error(f"Failed to count active sessions: {e}")
+            return 0
+    
+    # Private methods
+    async def store_session(self, session: AnalysisSession):
+        """Store session with proper error handling"""
+        session_data = json.dumps(session.to_dict, default=str)
+        await self.redis.setex(
+            f"{self.session_prefix}{session.session_id}",
+            self.default_ttl,
+            session_data
         )
-        
-        # Mark completion
-        state.ongoing_analyses[request_id].update({
-            "status": "completed",
-            "progress": 1.0,
-            "results": results,
-            "completion_time": datetime.utcnow(),
-            "current_step": "completed"
-        })
-        
-        logger.info(f"Analysis {request_id} completed successfully")
-        
-        # Move to completed analyses (keep for 24 hours)
-        state.completed_analyses[request_id] = state.ongoing_analyses.pop(request_id)
-        
-    except Exception as e:
-        logger.error(f"Analysis pipeline failed for {request_id}: {e}", exc_info=True)
-        state.ongoing_analyses[request_id].update({
-            "status": "failed",
-            "error": str(e),
-            "completion_time": datetime.utcnow()
-        })
-        raise
+    
+    def _dict_to_session(self, data_dict: Dict) -> AnalysisSession:
+        """Convert dictionary back to AnalysisSession object"""
+        session = AnalysisSession(
+            data_dict['session_id'],
+            data_dict['company'],
+            data_dict['analysis_type']
+        )
 
-# Enhanced Helper Functions
-async def _validate_analysis_request(request: DueDiligenceRequest) -> Dict[str, Any]:
-    """Enhanced request validation"""
+        # Restore all attributes
+        for key, value in data_dict.items():
+            if hasattr(session, key):
+                setattr(session, key, value)
+
+        return session
+    
+# Global session manager instance
+session_manager: Optional[RedisSessionManager] = None
+
+async def get_session_manager() -> RedisSessionManager:
+    """Dependency injection for session manager"""
+    if not session_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Session management service unavailable"
+        )
+    return session_manager
+
+async def process_analysis(self, session_id: str, company: str, analysis_type: str, additional_context: str):
+    """Production-grade background task with proper session management"""
+    session_mgr = await get_session_manager()
+
+    # Create session in Redis
+    session = await session_mgr.create_session(session_id, company, analysis_type)
+    session.created_at = datetime.now(timezone.utc).isoformat()
+    session.status = "processing"
+    await session_mgr.update_session(session)
+
     try:
-        # Check ticker format
-        if not request.company_ticker.isalpha():
-            return {"valid": False, "error": "Ticker must contain only letters"}
+        ACTIVE_ANALYSES.inc()
+        SESSION_COUNT.inc()
+
+        logger.info(f"Starting analysis for {company}(session: {session_id})")
+
+        # Get dependencies with proper error handling
+        financial_agent = await
+
+
+
+
+
+
+                
         
-        # Check rate limiting (simplified)
-        recent_analyses = [
-            a for a in state.ongoing_analyses.values() 
-            if a.get("start_time") and (datetime.utcnow() - a["start_time"]).total_seconds() < 300
-        ]
-        if len(recent_analyses) > 10:  # Max 10 analyses per 5 minutes
-            return {"valid": False, "error": "Rate limit exceeded"}
+
+                
+
+
+
         
-        # Check question length
-        for question in request.questions:
-            if len(question) > 1000:
-                return {"valid": False, "error": "Questions too long (max 1000 characters)"}
+                 
+
+
+ 
         
-        return {"valid": True}
-        
-    except Exception as e:
-        return {"valid": False, "error": f"Validation error: {str(e)}"}
 
-def _estimate_completion_time(analysis_type: str) -> str:
-    """Enhanced completion time estimation"""
-    estimates = {
-        "financial": "2-3 minutes",
-        "legal": "3-4 minutes", 
-        "market": "2-3 minutes",
-        "comprehensive": "5-7 minutes"
-    }
-    return estimates.get(analysis_type, "3-5 minutes")
 
-def _get_memory_usage() -> Dict[str, Any]:
-    """Get memory usage information"""
-    try:
-        import psutil
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        return {
-            "rss_mb": memory_info.rss / 1024 / 1024,
-            "vms_mb": memory_info.vms / 1024 / 1024,
-            "percent": process.memory_percent()
-        }
-    except ImportError:
-        return {"error": "psutil not available"}
 
-def _get_system_load() -> Dict[str, Any]:
-    """Get system load information"""
-    try:
-        import psutil
-        return {
-            "cpu_percent": psutil.cpu_percent(interval=1),
-            "load_avg": psutil.getloadavg() if hasattr(psutil, "getloadavg") else "N/A",
-            "disk_usage": psutil.disk_usage('/').percent
-        }
-    except ImportError:
-        return {"error": "psutil not available"}
 
-# Enhanced Error Handlers
-@app.exception_handler(500)
-async def internal_server_error_handler(request, exc):
-    error_id = str(uuid.uuid4())
-    logger.error(f"Internal server error {error_id}: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "detail": "Internal server error", 
-            "error_id": error_id,
-            "support_contact": "support@duediligence.ai"
-        }
-    )
 
-@app.exception_handler(429)
-async def rate_limit_handler(request, exc):
-    return JSONResponse(
-        status_code=429,
-        content={
-            "detail": "Rate limit exceeded", 
-            "retry_after": "60 seconds",
-            "limit": "10 requests per 5 minutes"
-        }
-    )
 
-@app.exception_handler(422)
-async def validation_error_handler(request, exc):
-    return JSONResponse(
-        status_code=422,
-        content={
-            "detail": "Validation error",
-            "errors": exc.errors() if hasattr(exc, 'errors') else str(exc)
-        }
-    )
 
-# Startup and Shutdown Events
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Due Diligence API starting up...")
-    # Initialize components
-    await state.orchestrator.initialize()
 
-@app.on_event("shutdown") 
-async def shutdown_event():
-    logger.info("Due Diligence API shutting down...")
-    # Cleanup resources
-    for request_id in list(state.ongoing_analyses.keys()):
-        state.ongoing_analyses[request_id]["status"] = "cancelled"
-        state.completed_analyses[request_id] = state.ongoing_analyses.pop(request_id)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        app,
-        host=settings.HOST,
-        port=settings.PORT,
-        log_level=settings.LOG_LEVEL.lower(),
-        access_log=True,
-        reload=settings.DEBUG
-    )
+
+
+
+
+
+
+
+

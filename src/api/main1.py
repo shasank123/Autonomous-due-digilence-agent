@@ -86,7 +86,7 @@ class SystemComponents:
 components = SystemComponents()
 
 # Redis connection for session storage
-async def _init_redis():
+async def init_redis():
     try:
         components.redis_client = await redis.Redis(
             host = os.getenv('REDIS_HOST', 'localhost' )
@@ -105,6 +105,133 @@ async def _init_redis():
         logger.error(f"❌ Redis connection failed: {e}")
         components.status['redis'] = ComponentStatus.FAILED
         components.redis_client = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application startup and shutdown events with comprehensive error handling"""
+    global session_manager
+    startup_success = False
+
+    try:
+        logger.info("🚀 Initializing Financial Due Diligence API...")
+        # Initialize Redis first
+        await init_redis()
+
+        # Initialize session manager
+        if components.redis_client and components.status.get('redis') == ComponentStatus.HEALTHY:
+            session_manager = RedisSessionManager(components.redis_client)
+            logger.info("✅ Redis Session Manager initialized")
+        else:
+            logger.warning("⚠️ Redis unavailable - session management disabled")
+            session_manager = None
+
+        # Initialize RAG system
+        try:
+            components.rag_system = ProductionRAGSystem()
+            components.status['rag_system'] = ComponentStatus.HEALTHY
+            logger.info("✅ RAG System initialized")
+        
+        except Exception as e:
+            logger.error(f"❌ RAG System initialization failed: {e}")
+            components.status['rag_system'] = ComponentStatus.FAILED
+            raise
+
+        # Initialize financial agent team
+        try:
+            components.financial_agent_team = await create_financial_team(
+                rag_system=components.rag_system
+            )
+            components.status['financial_agent'] = ComponentStatus.HEALTHY
+            logger.info("✅ Financial Agent Team initialized")
+            
+        except Exception as e:
+            logger.error(f"❌ Financial Agent Team initialization failed: {e}")
+            components.status['financial_agent'] = ComponentStatus.FAILED
+            raise
+
+        # Initialize other components
+        try:
+            components.company_resolver = CompanyResolver()
+            components.sec_collector = SECDataCollector()
+            components.document_processor = DocumentProcessor()
+            components.status.update({
+                'sec_collector': ComponentStatus.HEALTHY,
+                'company_resolver': ComponentStatus.HEALTHY,
+                'document_processor': ComponentStatus.HEALTHY
+            })
+            logger.info("✅ Support components initialized")
+        
+        except Exception as e:
+            logger.error(f"⚠️ Some support components failed: {e}")
+        
+        # Initialize orchestrator
+        try:
+            components.orchestator = DueDigillenceOrchestator()
+            components.status['orchestator'] = ComponentStatus.HEALTHY
+            logger.info("✅ Analysis Orchestrator initialized")
+        
+        except Exception as e:
+            logger.error(f"⚠️ Orchestrator not available: {e}")
+            components.status['orchestator'] = ComponentStatus.DEGRADED
+        
+        startup_success = True
+        logger.info("🎉 Financial Due Diligence API startup completed successfully!")
+
+    except Exception as e:
+        logger.critical(f"💥 API startup failed: {e}")
+        startup_success = False
+        raise
+
+    yield
+
+    # Shutdown
+    try:
+        logger.info("🛑 Shutting down Financial Due Diligence API...")
+        
+        cleanup_tasks = []
+
+        if components.financial_agent_team:
+            cleanup_tasks.append(components.financial_agent_team.close())
+        
+        if components.redis_client:
+            cleanup_tasks.append(components.redis_client.close())
+
+        if cleanup_tasks:
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+        logger.info("✅ API shutdown completed")
+        
+    except Exception as e:
+        logger.error(f"⚠️ Cleanup warning: {e}")
+
+# Create FastAPI app
+app = FastAPI(
+    title = "Autonomous Due Diligence API",
+    description="AI-powered multi-agent system for comprehensive company financial analysis",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
+# Add rate limiting to app state
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded,_rate_limit_exceeded_handler)
+
+# Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins = os.getenv('allowed_origins', '*').split(','),
+    allow_credentials = True,
+    allow_methods = ["*"],
+    allow_headers = ["*"]
+)
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts = os.getenv('allowed_hosts', '*').split(',')
+)
 
 # Pydantic models with comprehensive validation
 class AnalysisType(str, Enum):
@@ -356,24 +483,7 @@ async def get_session_manager() -> RedisSessionManager:
         )
     return session_manager
 
-async def process_analysis(self, session_id: str, company: str, analysis_type: str, additional_context: str):
-    """Production-grade background task with proper session management"""
-    session_mgr = await get_session_manager()
 
-    # Create session in Redis
-    session = await session_mgr.create_session(session_id, company, analysis_type)
-    session.created_at = datetime.now(timezone.utc).isoformat()
-    session.status = "processing"
-    await session_mgr.update_session(session)
-
-    try:
-        ACTIVE_ANALYSES.inc()
-        SESSION_COUNT.inc()
-
-        logger.info(f"Starting analysis for {company}(session: {session_id})")
-
-        # Get dependencies with proper error handling
-        financial_agent = await
 
 
 

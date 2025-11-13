@@ -222,39 +222,4 @@ class MemoryManager:
 
 
     
-    def get_cross_analysis_insights(
-        self,
-        user_id: str,
-        current_company: str,
-        analysis_type: str
-    ) -> Dict[str, Any]:
-        """Get relevant insights from previous analyses"""
-        insights = {
-            "financial_patterns": [],
-            "legal_risks": [],
-            "similar_companies": []
-        }
-        
-        try:
-            # Find similar financial patterns
-            financial_query = f"financial patterns ratios performance {current_company}"
-            insights["financial_patterns"] = self.search_similar_companies(
-                user_id, financial_query, limit=3
-            )
-            
-            # Find relevant legal risks
-            legal_query = f"legal compliance risks {current_company}"
-            insights["legal_risks"] = self.search_industry_risks(
-                user_id, legal_query, limit=3
-            )
-            
-            # Find companies with similar profiles
-            similarity_query = f"companies similar to {current_company} financial metrics"
-            insights["similar_companies"] = self.search_similar_companies(
-                user_id, similarity_query, limit=3
-            )
-            
-        except Exception as e:
-            self.logger.warning(f"Cross-analysis insights failed: {e}")
-        
-        return insights
+    

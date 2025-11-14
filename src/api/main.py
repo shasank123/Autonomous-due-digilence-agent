@@ -4,7 +4,7 @@ import os
 import uuid
 import logging
 import time
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Annotated
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -30,6 +30,9 @@ from prometheus_client import Histogram, Counter, Gauge
 # Load environment variables
 load_dotenv()
 
+log_dir = 'logs'
+os.makedirs(log_dir, exist_ok = True)
+
 # Configure structured logging
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +48,9 @@ logger = logging.getLogger("due_digilence_api")
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__),'..'))
 
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, project_root)
+
 try:
     from agents.financial_analyst import FinancialAgentTeam, create_financial_team
     from rag.core import ProductionRAGSystem
@@ -58,12 +64,6 @@ except ImportError as e:
     raise
 
 app_start_time = time.time()
-
-# Prometheus metrics
-REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
-REQUEST_DURATION = Histogram('api_request_duration_seconds', 'API request duration')
-ACTIVE_ANALYSES = Gauge('active_analyses', 'Number of active analyses')
-SESSION_COUNT = Gauge('analysis_sessions_total', 'Total analysis sessions')
 
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
@@ -220,6 +220,17 @@ app = FastAPI(
     openapi_url="/openapi.json"
 )
 
+# Prometheus metrics with duplicate protection
+"""
+_metrics_initialized = False
+
+if not hasattr(app, 'metrics_initialized'):
+    REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
+    REQUEST_DURATION = Histogram('api_request_duration_seconds', 'API request duration')
+    ACTIVE_ANALYSES = Gauge('active_analyses', 'Number of active analyses')
+    SESSION_COUNT = Gauge('analysis_sessions_total', 'Total analysis sessions')
+    app.metrics_initialized = True"""
+
 # Add rate limiting to app state
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded,_rate_limit_exceeded_handler)
@@ -249,7 +260,7 @@ class AnalysisRequest(BaseModel):
     company_ticker: str = Field(..., min_length=1, max_length=10, description="Company stock ticker symbol")
     analysis_type: AnalysisType = Field(default=AnalysisType.COMPREHENSIVE)
     additional_context: Optional[str] = Field(default= None, max_length=1000)
-    priority: str = Field(default="normal", regex="^(low|normal|high|urgent)$")
+    priority: Annotated[str, Field(pattern="^(low|normal|high|urgent)$")] = "normal"
     timeout_seconds: int = Field(default=300, ge=60, le=1000)
 
     @field_validator('company_ticker')
@@ -833,7 +844,7 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=os.getenv("ENVIRONMENT") == "development",
+        reload=False,
         log_level="info",
         access_log=True
 

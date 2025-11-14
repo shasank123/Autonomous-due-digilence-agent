@@ -10,11 +10,11 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 
-from src.agents.financial_analyst import FinancialAnalysisAgent
-from src.agents.legal_reviewer import LegalAnalysisAgent
-from src.agents.market_analyst import MarketAnalysisAgent
-from src.rag.core import ProductionRAGSystem
-from src.agents.memory_manager import MemoryManager
+from agents.financial_analyst import FinancialAgentTeam
+from agents.legal_reviewer import LegalAnalysisAgent
+from agents.market_analyst import MarketAnalysisAgent
+from rag.core import ProductionRAGSystem
+from agents.memory_manager import MemoryManager
 
 class AnalysisState(TypedDict):
     # Inputs - Data coming FROM the user
@@ -234,7 +234,7 @@ class DueDigillenceOrchestator:
 
         try:
             if not await self._validate_company(state["company_ticker"]):
-                state["errors"].append(f""Unsupported company ticker: {state['company_ticker']})
+                state["errors"].append(f"Unsupported company ticker: {state['company_ticker']}")
                 return state
             
             validation_types = ["comprehensive", "financial", "legal", "market"]
@@ -632,7 +632,7 @@ class DueDigillenceOrchestator:
             "financial_analysis": state.get("financial_analysis", {}),
             "legal_analysis": state.get("legal_analysis", {}),
             "market_analysis": state.get("market_analysis", {}),
-            "rag_insights": f"analysed {sum(len(v) for v in state.get("rag_context").values())} SEC documents",
+            "rag_insights": f"analysed {sum(len(v) for v in state.get('rag_context').values())} SEC documents",
             "questions_asked" : state.get("questions", []),
             "analysis_duration": self._calculate_duration(state["start_time"]),
             "data_quality": "HIGH" if not state.get("warnings") else "MEDIUM"

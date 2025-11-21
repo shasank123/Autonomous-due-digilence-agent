@@ -124,7 +124,7 @@ class MarketAgentTeam:
                 'JNJ': 'Healthcare', 'PFE': 'Healthcare', 'MRK': 'Healthcare'
             }
 
-            return industry_mapping.get('company', 'Unknown Industry')
+            return industry_mapping.get(company, 'Unknown Industry')
         
         except Exception as e:
             self.logger.warning(f"Industry identification failed for {company}: {e}")
@@ -175,35 +175,35 @@ class MarketAgentTeam:
 
                 # Growth indicators
                 if any(term in content_lower for term in ['growth', 'expanding', 'increasing', 'rising']):
-                    trend_analysis['growth_indicators'].append(
+                    trend_analysis['growth_indicators'].append({
                         'content': content[:200] + "..." if len(content) > 200 else content,
                         'score': score,
                         'confidence': self._calculate_market_confidence(content)
-                    )
+                    })
         
                 # Competitive positioning
                 if any(term in content_lower for term in ['competitive', 'leader', 'position', 'market share']):
-                    trend_analysis['competitive_position'].append(
+                    trend_analysis['competitive_position'].append({
                         'content': content[:200] + "..." if len(content) > 200 else content,
                         'score': score,
                         'company_mentioned': company.lower() in content_lower
-                    )
+                    })
 
                 # Market share data
                 if any(term in content_lower for term in ['market share', '%', 'percent', 'dominant']):
-                    trend_analysis['market_share_data'].append(
+                    trend_analysis['market_share_data'].append({
                         'content': content[:200] + "..." if len(content) > 200 else content,
                         'score': score,
                         'metrics': self._extract_market_metrics(content)
-                    )
+                    })
 
                 # Risk factors
                 if any(term in content_lower for term in ['risk', 'challenge', 'threat', 'competition']):
-                    trend_analysis['risk_factors'].append(
+                    trend_analysis['risk_factors'].append({
                         'content': content[:200] + "..." if len(content) > 200 else content,
                         'score': score,
                         'severity': self._assess_risk_severity(content)
-                    )
+                    })
 
                 # Opportunities
                 if any(term in content_lower for term in ['opportunity', 'potential', 'growth area', 'emerging']):
@@ -250,7 +250,7 @@ class MarketAgentTeam:
     def _extract_market_metric(self, content: str) -> List[str]:
         """Extract market metrics from content"""
 
-        metrics =[]
+        metrics = []
         try:
             lines = content.split('\n')
             for line in lines:
@@ -263,7 +263,7 @@ class MarketAgentTeam:
             self.logger.warning(f"Market metrics extraction failed: {e}")
             return []
 
-    def _asses_risk_severity(self, content: str) -> str:
+    def _assess_risk_severity(self, content: str) -> str:
         """Assess risk severity from content"""
 
         content_lower = content.lower()
@@ -513,7 +513,7 @@ class MarketAgentTeam:
                     'distribution': ['distribution', 'network', 'reach', 'channel']
                 }
 
-                for advantage_type, keywords in advantage_type.items():
+                for advantage_type, keywords in advantage_types.items():
                     if any(keyword in content_lower for keyword in keywords):
                         advantages.append({
                             'type': advantage_type,
@@ -549,7 +549,7 @@ class MarketAgentTeam:
                 if competitor['strengths']:
                     report_parts.append(f" - Strengths: {len(competitor['strengths'])} identified")
 
-                if competitor['weakness']:
+                if competitor['weaknesses']:
                     report_parts.append(f" - Weaknesses: {len(competitor['weaknesses'])} identified")
 
         else:
@@ -632,7 +632,7 @@ class MarketAgentTeam:
 
             # Innovation opportunities  
             innovations_ops = self._analyze_innovation_opportunities(company)
-            opportunity_analysis['innovation_areas'].append(innovations_ops)
+            opportunity_analysis['innovation_areas'].extend(innovations_ops)
 
             return self._format_opportunity_assessment_report(opportunity_analysis, company, market_segments)
         
@@ -686,10 +686,10 @@ class MarketAgentTeam:
 
                 # Assess growth potential
                 if any(term in content_lower for term in ['high growth', 'rapidly expanding', 'significant opportunity']):
-                    analysis['growth_potential'] == 'HIGH'
+                    analysis['growth_potential'] = 'HIGH'
                 
                 elif any(term in content_lower for term in ['limited', 'saturated', 'mature']):
-                    analysis['growth_potential'] == 'LOW'
+                    analysis['growth_potential'] = 'LOW'
 
                 # Extract key insights
                 analysis['key_insights'].append({

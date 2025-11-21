@@ -17,6 +17,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from rag.core import ProductionRAGSystem
 from data.processors.document_parser import DocumentProcessor
 from data.collectors.sec_edgar import SECDataCollector
+from tools.market_tools import MarketTools
 
 class MarketAgentTeam:
     """Market Analysis Agent Team integrated with our RAG system"""
@@ -26,6 +27,7 @@ class MarketAgentTeam:
         self.rag_system = rag_system
         self.sec_collector = SECDataCollector()
         self.document_parser = DocumentProcessor()
+        self.tools = MarketTools(self.rag_system, self.sec_collector)
         self.team = None
         self.logger = self._setup_logging()
         self._create_agents()
@@ -44,784 +46,107 @@ class MarketAgentTeam:
             logger.setLevel(logging.INFO)
         return logger
     
-    # Market Analysis Tool Functions
-    async def analyze_industry_trends(self, company: str, industry: Optional[str] = None) -> str:
-        """Analyze industry trends and market positioning with comprehensive data validation"""
+    def _create_agents(self):
+        """Create market analysis agents with specialized roles"""
+
+        # Industry Analyst - Market trends and competitive landscape
+        self.industry_analyst = AssistantAgent(
+            name="industry_analyst",
+            model_client=self.model_client,
+            model_context=BufferedChatCompletionContext(buffer_size=15),
+            tools = [self.tools.analyze_industry_trends, self.tools.research_competitive_landscape],
+            system_message="""You are an Industry Analysis Specialist. Your responsibilities:
+
+            1. **Market Trend Analysis**: Use analyze_industry_trends() to examine industry dynamics
+            2. **Competitive Landscape**: Use research_competitive_landscape() to analyze competitors
+            3. **Growth Pattern Analysis**: Identify market growth drivers and patterns
+            4. **Sector Performance**: Evaluate industry sector performance and outlook
+
+            **Key Focus Areas:**
+            - Industry growth rates and market size
+            - Competitive positioning and market share
+            - Emerging trends and disruptions
+            - Regulatory and macroeconomic impacts
+
+            **Tools Available:**
+            - analyze_industry_trends(company, industry): Analyze market trends and positioning
+            - research_competitive_landscape(company, competitors): Research competitive environment
+
+            Use 'INDUSTRY_ANALYSIS_COMPLETE' when industry analysis is finished.
+            """
+        )
+
+        # Market Researcher - Industry reports and market intelligence
+        self.market_researcher = AssistantAgent(
+            name = "market_researcher",
+            model_client=self.model_client,
+            model_context=BufferedChatCompletionContext(buffer_size=12),
+            tools = [self.tools.assess_market_opportunities],
+            system_message="""You are a Market Research Specialist. Your responsibilities:
+
+            1. **Opportunity Assessment**: Use assess_market_opportunities() to identify growth areas
+            2. **Market Intelligence**: Gather and analyze market data and reports
+            3. **Segment Analysis**: Evaluate specific market segments and niches
+            4. **Growth Forecasting**: Project market growth and opportunity sizing
+
+            **Key Analysis Areas:**
+            - Market opportunity identification and sizing
+            - Segment growth potential and attractiveness
+            - Customer needs and market gaps
+            - Innovation and emerging market trends
+
+            **Tools Available:**
+            - assess_market_opportunities(company, segments): Evaluate growth opportunities
+
+            Use 'MARKET_RESEARCH_COMPLETE' when market research is finished.
+            """
+        )
+
+        # Competitive Analyst - Peer comparison and positioning
+        self.competitive_analyst = AssistantAgent(
+            name = "competitive_analyst",
+            model_client = self.model_client,
+            model_context=BufferedChatCompletionContext(buffer_size=10),
+            tools = [self.tools.research_competitive_landscape, self.tools.analyze_industry_trends],
+            system_message="""You are a Competitive Intelligence Specialist. Your responsibilities:
+
+            1. **Competitive Benchmarking**: Compare company performance against peers
+            2. **Positioning Analysis**: Evaluate competitive positioning and differentiation
+            3. **Strategic Assessment**: Analyze competitor strategies and capabilities
+            4. **Threat Analysis**: Identify competitive threats and market pressures
+
+            **Review Checklist:**
+            - Comprehensive competitor profiling
+            - SWOT analysis (Strengths, Weaknesses, Opportunities, Threats)
+            - Market share dynamics and trends
+            - Strategic implications and recommendations
+
+            **Tools Available:**
+            - research_competitive_landscape(company, competitors): Analyze competitors
+            - analyze_industry_trends(company, industry): Contextual industry analysis
+
+            Use 'COMPETITIVE_ANALYSIS_COMPLETE' when competitive analysis is finished.
+            """
+        )
+
+    def _create_team(self):
+        """Create the market analysis team with robust termination conditions"""
+
+        termination_conditions = (
+            TextMentionTermination("MARKET_ANALYSIS_COMPLETE") |
+            TextMentionTermination("INDUSTRY_ANALYSIS_COMPLETE") |
+            TextMentionTermination("COMPETITIVE_ANALYSIS_COMPLETE") |
+            TextMentionTermination("MARKET_RESEARCH_COMPLETE") |
+            TextMentionTermination("TERMINATE") |
+            MaxMessageTermination(max_messages=25)
+        )
+
+        self.team = RoundRobinGroupChat(
+            [self.industry_analyst, self.market_researcher, self.competitive_analyst],
+            termination_condition=termination_conditions,
+            max_turns=20
+        )
 
-        try:
-            if not company or not company.strip():
-                return "❌ Company ticker is required for industry analysis"
-            
-            company = company.upper().strip()
-            self.logger.info(f"Analyzing industry trends for {company}")
-
-            # Determine industry if not provided
-            if not industry:
-                industry = await self._identify_company_industry(company)
-
-            # Multi-faceted industry analysis
-            analysis_queries = [
-                f"{industry} market trends growth forecast",
-                f"{company} competitive positioning {industry}",
-                f"{industry} market share competitive landscape",
-                f"{company} industry performance benchmarks"
-            ]
-
-            all_industry_docs = []
-            for query in analysis_queries:
-                try:
-
-                    scored_documents = self.rag_system.query_with_similarity_scores(
-                        question=query,
-                        company=company,
-                        metric_type="market_analysis",
-                        k=5,
-                        score_threshold=0.5
-                    )
-                    all_industry_docs.append(scored_documents)
-                
-                except Exception as query_error:
-                    self.logger.warning(f"Industry query failed: {query_error}")
-                    continue
-            
-            if not all_industry_docs:
-                return f"📊 No industry analysis data found for {company} in {industry}"
-            
-            # Comprehensive trend analysis
-            trend_analysis = self._analyze_market_trends(all_industry_docs, company, industry)
-            return self._format_industry_analysis_report(trend_analysis, company, industry)
-        
-        except Exception as e:
-            self.logger.error(f"Industry trend analysis failed for {company}: {e}")
-            return f"❌ System error in industry analysis: {str(e)}"
-        
-    async def _identify_company_industry(self, company: str) -> str:
-        """Identify company's primary industry from available data"""
-
-        try:
-            # Query for company business information
-            company_docs = self.rag_system.query_with_similarity_scores(
-                question=f"{company} business industry sector SIC",
-                company=company,
-                k=3,
-                score_threshold=0.6
-            )
-           
-            if company_docs:
-                # Extract industry from documents
-                for doc, score in company_docs:
-                    industry = self._extract_industry_from_content(doc.page_content)
-                    if industry:
-                        self.logger.info(f"Identified industry for {company}: {industry}")
-                        return industry
-                    
-            # Fallback to common industry mapping
-            industry_mapping = {
-                'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology',
-                'TSLA': 'Automotive', 'F': 'Automotive', 'GM': 'Automotive',
-                'JPM': 'Financial Services', 'BAC': 'Financial Services', 'WFC': 'Financial Services',
-                'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy',
-                'JNJ': 'Healthcare', 'PFE': 'Healthcare', 'MRK': 'Healthcare'
-            }
-
-            return industry_mapping.get(company, 'Unknown Industry')
-        
-        except Exception as e:
-            self.logger.warning(f"Industry identification failed for {company}: {e}")
-            return "Unknown Industry"
-        
-    def _extract_industry_from_content(self, content: str) -> Optional[str]:
-        """Extract industry information from document content"""
-
-        try:
-            content_lower = content.lower()
-
-            # Industry keyword mapping
-            industry_keywords = {
-                'technology': ['technology', 'software', 'hardware', 'semiconductor', 'tech'],
-                'healthcare': ['healthcare', 'pharmaceutical', 'medical', 'biotech', 'health'],
-                'financial': ['financial', 'banking', 'insurance', 'investment', 'finance'],
-                'energy': ['energy', 'oil', 'gas', 'renewable', 'petroleum'],
-                'automotive': ['automotive', 'auto', 'vehicle', 'car', 'automobile'],
-                'retail': ['retail', 'consumer', 'ecommerce', 'merchandise'],
-                'industrial': ['industrial', 'manufacturing', 'machinery', 'equipment']
-            }
-
-            for industry, keywords in industry_keywords.items():
-                if any(keyword in content_lower for keyword in keywords):
-                    return industry.title()
-                
-            return None
-        
-        except Exception as e:
-            self.logger.warning(f"Industry extraction failed: {e}")
-            return None
-        
-    def _analyze_market_trends(self, industry_docs: List[Tuple], company: str, industry: str) -> Dict[str, Any]:
-        """Analyze comprehensive market trends from documents"""
-
-        trend_analysis = {
-            'growth_indicators': [],
-            'competitive_position': [],
-            'market_share_data': [],
-            'risk_factors': [],
-            'opportunities': []
-        }
-
-        for doc, score in industry_docs:
-            try:
-                content = doc.page_content
-                content_lower = content.lower()
-
-                # Growth indicators
-                if any(term in content_lower for term in ['growth', 'expanding', 'increasing', 'rising']):
-                    trend_analysis['growth_indicators'].append({
-                        'content': content[:200] + "..." if len(content) > 200 else content,
-                        'score': score,
-                        'confidence': self._calculate_market_confidence(content)
-                    })
-        
-                # Competitive positioning
-                if any(term in content_lower for term in ['competitive', 'leader', 'position', 'market share']):
-                    trend_analysis['competitive_position'].append({
-                        'content': content[:200] + "..." if len(content) > 200 else content,
-                        'score': score,
-                        'company_mentioned': company.lower() in content_lower
-                    })
-
-                # Market share data
-                if any(term in content_lower for term in ['market share', '%', 'percent', 'dominant']):
-                    trend_analysis['market_share_data'].append({
-                        'content': content[:200] + "..." if len(content) > 200 else content,
-                        'score': score,
-                        'metrics': self._extract_market_metrics(content)
-                    })
-
-                # Risk factors
-                if any(term in content_lower for term in ['risk', 'challenge', 'threat', 'competition']):
-                    trend_analysis['risk_factors'].append({
-                        'content': content[:200] + "..." if len(content) > 200 else content,
-                        'score': score,
-                        'severity': self._assess_risk_severity(content)
-                    })
-
-                # Opportunities
-                if any(term in content_lower for term in ['opportunity', 'potential', 'growth area', 'emerging']):
-                    trend_analysis['opportunities'].append({
-                        'content': content[:200] + "..." if len(content) > 200 else content,
-                        'score': score,
-                        'potential': self._assess_opportunity_potential(content)
-                    })
-
-            except Exception as doc_error:
-                self.logger.warning(f"Market trend analysis failed for document: {doc_error}")
-                continue
-
-        return trend_analysis
-    
-    def _calculate_market_confidence(self, content: str) -> float:
-        """Calculate confidence score for market analysis"""
-
-        try:
-            confidence_factors = 0
-            total_factors = 0
-
-            # Quantitative data presence
-            if any(char.isdigit() for char in content):
-                confidence_factors += 1
-            total_factors += 1
-
-            # Specific metrics mentioned
-            if any(term in content.lower() for term in ['%', 'growth', 'increase', 'decrease']):
-                confidence_factors += 1
-            total_factors += 1
-
-            # Time references
-            if any(term in content.lower() for term in ['202', 'q1', 'q2', 'q3', 'q4']):
-                confidence_factors += 1
-            total_factors += 1
-
-            return confidence_factors / total_factors
-        
-        except Exception as e:
-            self.logger.error(f"Market confidence calculation failed: {e}")
-            return 0.5
-        
-    def _extract_market_metric(self, content: str) -> List[str]:
-        """Extract market metrics from content"""
-
-        metrics = []
-        try:
-            lines = content.split('\n')
-            for line in lines:
-                line_lower = line.lower()
-                if any(term in line_lower for term in ['market share', 'growth rate', 'cagr']):
-                    metrics.append(line.strip())
-            return metrics[:3]
-
-        except Exception as e:
-            self.logger.warning(f"Market metrics extraction failed: {e}")
-            return []
-
-    def _assess_risk_severity(self, content: str) -> str:
-        """Assess risk severity from content"""
-
-        content_lower = content.lower()
-
-        if any(term in content_lower for term in ['high risk', 'significant', 'major', 'severe']):
-            return "HIGH"
-        elif any(term in content_lower for term in ['moderate', 'medium', 'some risk']):
-            return "MEDIUM"
-        elif any(term in content_lower for term in ['low risk', 'minor', 'limited']):
-            return "LOW"
-        else:
-            return "UNKNOWN"
-
-    def _assess_opportunity_potential(self, content: str) -> str:
-        """Assess opportunity potential from content"""
-        content_lower = content.lower()
-        
-        if any(term in content_lower for term in ['significant', 'substantial', 'major opportunity']):
-            return "HIGH"
-        elif any(term in content_lower for term in ['moderate', 'potential', 'emerging']):
-            return "MEDIUM"
-        elif any(term in content_lower for term in ['limited', 'small', 'niche']):
-            return "LOW"
-        else:
-            return "UNKNOWN"
-
-    def _format_industry_analysis_report(self, trend_analysis: Dict[str, Any], company: str, industry: str) -> str:
-        """Format comprehensive industry analysis report"""
-
-        report_parts = [
-            f"🏭 Industry Analysis Report: {company}",
-            f"Industry: {industry}",
-            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            ""
-        ] 
-
-        # Growth Analysis
-        growth_indicators = trend_analysis['growth_indicators']
-        if growth_indicators:
-            report_parts.append("📈 Growth Indicators:")
-            for indicator in growth_indicators:
-                report_parts.append(f"• {indicator['content']} (confidence: {indicator['confidence']:.2f})")
-
-        else:
-            report_parts.append("📈 Growth Indicators: Limited data available")
-
-        # Competitive Position
-        competitive_data = trend_analysis['competitive_position']
-        if competitive_data:
-            report_parts.append("")
-            report_parts.append("🥊 Competitive Positioning:")
-
-            company_specific = [d for d in competitive_data if d['company_mentioned']]
-            if company_specific:
-                report_parts.append(f"• Company-specific insights: {len(company_specific)} documents")
-
-            for position in competitive_data[:2]:
-                report_parts.append(f"• {position['content']}")  
-
-        # Market Share
-        market_share = trend_analysis['market_share_data']
-        if market_share:
-            report_parts.append("")
-            report_parts.append("📊 Market Share Analysis:")
-
-            for share_data in market_share[:2]:
-                if share_data['metrics']:
-                    report_parts.append(f" • Metrics: {','.join(share_data['metrics'])}")
-
-        # Risk Assessment
-        risks = trend_analysis['risk_factors']
-        if risks:
-            report_parts.append("")
-            report_parts.append("⚠️  Risk Factors:")
-
-            high_risks = [r for r in risks if r['severity'] == 'HIGH']
-            if high_risks:
-                report_parts.append(f" • High severity risks: {len(high_risks)} identified")
-            
-            for risk in risks[:2]:
-                report_parts.append(f" • {risk['content']} (Severity: {risk['severity']})")
-
-        # Opportunities
-        opportunities = trend_analysis['opportunities']
-        if opportunities:
-            report_parts.append("")
-            report_parts.append("🎯 Growth Opportunities:")
-
-            high_potential = [o for o in opportunities if o['potential'] == 'HIGH']
-            if high_potential:
-                report_parts.append(f" • High-potential opportunities: {len(high_potential)} identified")
-            
-            for opportunity in opportunities[:2]:
-                report_parts.append(f" • {opportunity['content']} (Potential: {opportunity['potential']})")
-
-        # Summary
-        report_parts.append("")
-        report_parts.append("🎯 Market Assessment Summary:")
-
-        total_insights = sum(len(data) for data in trend_analysis.values())
-
-        if total_insights > 15:
-            report_parts.append("  • 📊 Comprehensive market intelligence available")
-        elif total_insights > 8:
-            report_parts.append("  • 📈 Good market insights for strategic planning")
-        else:
-            report_parts.append("  • 📋 Limited market data - consider additional research")
-
-        return "\n".join(report_parts)
-    
-    async def research_competitive_landscape(self, company: str, competitors: Optional[List[str]] = None) -> str:
-        """Research competitive landscape with peer analysis"""
-
-        try:
-            if not company or not company.strip():
-                return "❌ Company ticker is required for competitive analysis"
-            
-            company = company.upper().strip()
-            self.logger.info(f"Researching competitive landscape for {company}")
-
-            # Identify competitors if not provided
-            if not competitors:
-                competitors = await self._identify_competitors(company)
-
-            competitive_analysis = {
-                'direct_competitors': [],
-                'competitive_advantages': [],
-                'market_differentiators': [],
-                'peer_performance': []
-            }
-
-            # Analyze each competitor
-            for competitor in competitors[:5]: # Limit to top 5 competitors
-                try:
-                    competitor_analysis = await self._analyze_competitor(company, competitor)
-                    if competitor_analysis:
-                        competitive_analysis['direct_competitors'].append(competitor_analysis)
-
-                except Exception as comp_error:
-                    self.logger.warning(f"Competitor analysis failed for {competitor}: {comp_error}")
-                    continue
-            
-            # Analyze company's competitive position
-            company_advantages = self._analyze_competitive_advantages(company)
-            competitive_analysis['competitive_advantages'] = company_advantages
-
-            return self._format_competitive_analysis_report(competitive_analysis, company, competitors)
-        
-        except Exception as e:
-            self.logger.error(f"Competitive landscape research failed for {company}: {e}")
-            return f"❌ System error in competitive analysis: {str(e)}"
-        
-    async def _identify_competitors(self, company: str) -> List[str]:
-        """Identify company's main competitors"""
-
-        try:
-            # Common competitor mappings
-            competitor_map = {
-                'AAPL': ['MSFT', 'GOOGL', 'Samsung'],
-                'MSFT': ['AAPL', 'GOOGL', 'AMZN', 'ORCL'],
-                'GOOGL': ['MSFT', 'AAPL', 'META', 'AMZN'],
-                'TSLA': ['F', 'GM', 'RIVN', 'NIO'],
-                'JPM': ['BAC', 'WFC', 'C', 'GS'],
-                'XOM': ['CVX', 'COP', 'BP', 'SHEL'],
-                'JNJ': ['PFE', 'MRK', 'ABT', 'GILD']
-            }
-
-            return competitor_map.get(company, [])
-
-        except Exception as e:
-            self.logger.warning(f"Competitor identification failed for {company}: {e}")
-            return []
-
-    async def _analyze_competitor(self, company: str, competitor: str) -> Dict[str, Any]:
-        """Analyze individual competitor"""
-
-        try:
-            # Query for competitor comparison data
-            scored_docs = self.rag_system.query_with_similarity_scores(
-                question=f"{company} vs {competitor} comparison competitive",
-                company=company,
-                metric_type="competitive_analysis",
-                k=3,
-                score_threshold=0.4
-            )
-
-            if not scored_docs:
-                return None
-
-            analysis = {
-                'competitor': competitor,
-                'comparison_points': [],
-                'strengths': [],
-                'weaknesses': []
-            }
-
-            for doc, score in scored_docs:
-                content_lower = doc.page_content.lower()
-
-                # Extract comparison points
-                if 'vs' in content_lower or 'compar' in content_lower:
-                    analysis['comparison_points'].append({
-                        'content': doc.page_content[:150] + "..." if len(doc.page_content) > 150 else doc.page_content,
-                        'score': score
-                    })
-
-                # Identify strengths/weaknesses
-                if any(term in content_lower for term in ['advantage', 'strength', 'better', 'superior']):
-                    analysis['strengths'].append({
-                        'content': doc.page_content[:100],
-                        'score': score
-                    })
-
-                if any(term in content_lower for term in ['weakness', 'challenge', 'lagging', 'trailing']):
-                        analysis['weaknesses'].append({
-                            'content': doc.page_content[:100],
-                            'score': score
-                        })
-
-            return analysis if analysis['comparison_points'] else None
-        
-        except Exception as e:
-            self.logger.warning(f"Individual competitor analysis failed for {competitor}: {e}")
-            return None
-        
-    async def _analyze_competitive_advantages(self, company: str) -> List[Dict[str, Any]]:
-        """Analyze company's competitive advantages"""
-
-        try:
-            scored_docs = self.rag_system.query_with_similarity_scores(
-                question=f"{company} competitive advantage strength differentiation",
-                company=company,
-                metric_type="business_analysis",
-                k=5,
-                score_threshold=0.5
-            )
-
-            advantages = []
-            
-            for doc, score in scored_docs:
-                content_lower = doc.page_content.lower()
-
-                advantage_types = {
-                    'technology': ['technology', 'innovation', 'patent', 'proprietary'],
-                    'brand': ['brand', 'reputation', 'recognition', 'loyalty'],
-                    'cost': ['cost', 'efficiency', 'margin', 'pricing'],
-                    'distribution': ['distribution', 'network', 'reach', 'channel']
-                }
-
-                for advantage_type, keywords in advantage_types.items():
-                    if any(keyword in content_lower for keyword in keywords):
-                        advantages.append({
-                            'type': advantage_type,
-                            'content': doc.page_content[:120] if len(doc.page_content) > 120 else doc.page_content,
-                            'score': score
-                        })
-                        break
-            
-            return advantages
-        
-        except Exception as e:
-            self.logger.warning(f"Competitive advantages analysis failed for {company}: {e}")
-            return []
-        
-    def _format_competitive_analysis_report(self, competitive_analysis: Dict[str, Any], company: str, competitors: List[str]) -> str:
-        """Format comprehensive competitive analysis report"""
-
-        report_parts = [
-            f"🥊 Competitive Landscape Analysis: {company}",
-            f"Key Competitors: {', '.join(competitors[:5])}",
-            f"Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            ""
-        ]
-
-        # Competitor Analysis
-        direct_competitors = competitive_analysis['direct_competitors']
-        if direct_competitors:
-            report_parts.append(f"🎯 Direct Competitor Analysis:")
-
-            for competitor in direct_competitors:
-                report_parts.append(f" • {competitor['competitor']}:")
-
-                if competitor['strengths']:
-                    report_parts.append(f" - Strengths: {len(competitor['strengths'])} identified")
-
-                if competitor['weaknesses']:
-                    report_parts.append(f" - Weaknesses: {len(competitor['weaknesses'])} identified")
-
-        else:
-            report_parts.append("🎯 Direct Competitor Analysis: Limited comparison data available")
-
-        # Competitive Advantages
-        advantages = competitive_analysis['competitive_advantages']
-        if advantages:
-            report_parts.append("")
-            report_parts.append("🏆 Competitive Advantages:")
-
-            advantage_type = {}
-            for advantage in advantages:
-                adv_type = advantage['type']
-                
-                if adv_type not in advantage_type:
-                    advantage_type[adv_type] = 0
-
-                advantage_type[adv_type] += 1
-
-            for adv_type, count in advantage_type.items():
-                report_parts.append(f"  • {adv_type.title()}: {count} advantage(s) identified")
-
-            # Show top advantages
-            for advantage in advantages[:3]:
-                report_parts.append(f" - {advantage['content']}")
-
-        # Strategic Recommendations
-        report_parts.append("")
-        report_parts.append("💡 Strategic Recommendations:")
-
-        if advantages and direct_competitors:
-            report_parts.append("  • Leverage identified competitive advantages in market positioning")
-            report_parts.append("  • Monitor key competitors for emerging threats")
-            report_parts.append("  • Focus on differentiation in competitive segments")
-
-        elif advantages:
-            report_parts.append("  • Capitalize on competitive advantages for market growth")
-            report_parts.append("  • Conduct deeper competitor research for complete analysis")
-
-        else:
-            report_parts.append("  • Invest in competitive intelligence gathering")
-            report_parts.append("  • Focus on building sustainable competitive advantages")   
-
-        return "\n".join(report_parts)
-
-    async def assess_market_opportunities(self, company: str, market_segments: Optional[List[str]] = None) -> str:
-        """Assess market opportunities and growth potential"""
-        try:
-            if not company or not company.strip():
-                return "❌ Company ticker is required for market opportunity assessment"
-
-            company = company.upper().strip()
-            self.logger.info(f"Assessing market opportunities for {company}") 
-
-            # Identify relevant market segments
-            if not market_segments:
-                market_segments = await self._identify_market_segments(company)
-
-            opportunity_analysis = {
-                'growth_segments': [],
-                'emerging_markets': [],
-                'innovation_areas': [],
-                'partnership_opportunities': []
-            }
-
-            # Analyze each market segment
-            for segment in market_segments:
-                try:
-                    segment_analysis = self._analyze_market_segment(company, segment)
-                    if segment_analysis:
-                        if segment_analysis['growth_potential'] == 'HIGH':
-                            opportunity_analysis['growth_segments'].append(segment_analysis)
-                        elif 'emerging' in segment.lower() or 'new' in segment.lower():
-                            opportunity_analysis['emerging_markets'].append(segment_analysis)
-
-                except Exception as segment_error:
-                    self.logger.warning(f"Market segment analysis failed for {segment}: {segment_error}")
-                    continue
-
-            # Innovation opportunities  
-            innovations_ops = self._analyze_innovation_opportunities(company)
-            opportunity_analysis['innovation_areas'].extend(innovations_ops)
-
-            return self._format_opportunity_assessment_report(opportunity_analysis, company, market_segments)
-        
-        except Exception as e:
-            self.logger.error(f"Market opportunity assessment failed for {company}: {e}")
-            return f"❌ System error in opportunity assessment: {str(e)}"
-        
-    async def _identify_market_segments(self, company: str) -> List[str]:
-         """Identify relevant market segments for the company"""
-
-         try:
-             # Common market segment mappings
-             segment_map = {
-                'AAPL': ['Smartphones', 'Wearables', 'Services', 'Personal Computing'],
-                'MSFT': ['Cloud Computing', 'Enterprise Software', 'Gaming', 'AI'],
-                'TSLA': ['Electric Vehicles', 'Energy Storage', 'Autonomous Driving'],
-                'JNJ': ['Pharmaceuticals', 'Medical Devices', 'Consumer Health'],
-                'AMZN': ['E-commerce', 'Cloud Services', 'Digital Advertising', 'Logistics']
-             }
-
-             return segment_map.get(company, ['Core Business', 'Adjacent Markets', 'New Ventures'])
-         
-         except Exception as e:
-            self.logger.warning(f"Market segment identification failed for {company}: {e}")
-            return ['Core Business', 'Growth Areas']
-         
-    async def _analyze_market_segment(self, company: str, segment: str) -> Optional[Dict[str, Any]]:
-        """Analyze specific market segment opportunity"""
-
-        try:
-            scored_docs = self.rag_system.query_with_similarity_scores(
-                question=f"{company} {segment} market opportunity growth potential",
-                company=company,
-                metric_type="market_opportunity",
-                k=3,
-                score_threshold=0.4
-            )
-
-            if not scored_docs:
-                return None
-
-            analysis = {
-                'segment': segment,
-                'growth_potential': 'MEDIUM',
-                'key_insights': [],
-                'barriers': []
-            }
-
-            for doc, score in scored_docs:
-                content_lower = doc.page_content.lower()
-
-                # Assess growth potential
-                if any(term in content_lower for term in ['high growth', 'rapidly expanding', 'significant opportunity']):
-                    analysis['growth_potential'] = 'HIGH'
-                
-                elif any(term in content_lower for term in ['limited', 'saturated', 'mature']):
-                    analysis['growth_potential'] = 'LOW'
-
-                # Extract key insights
-                analysis['key_insights'].append({
-                    'content': doc.page_content[:120] + "..." if len(doc.page_content) > 120 else doc.page_content,
-                    'score': score
-                })
-
-                # Identify barriers
-                if any(term in content_lower for term in ['barrier', 'challenge', 'obstacle', 'competition']):
-                    analysis['barriers'].append({
-                        'content': doc.page_content[:100],
-                        'score': score
-                    })
-
-            return analysis
-        
-        except Exception as e:
-            self.logger.error(f"Market segment analysis failed for {segment}: {e}")
-            return None
-
-    async def _analyze_innovation_opportunities(self, company: str) -> List[Dict[str, Any]]:
-        """Analyze innovation and R&D opportunities"""
-
-        try:
-            scored_docs = self.rag_system.query_with_similarity_scores(
-                question=f"{company} innovation research development new technology",
-                company=company,
-                metric_type="innovation",
-                k=4,
-                score_threshold=0.5
-            )
-
-            innovations = []
-            for doc, score in scored_docs:
-                content_lower = doc.page_content.lower()
-
-                innovation_areas = {
-                    'technology': ['ai', 'machine learning', 'blockchain', 'iot'],
-                    'product': ['new product', 'feature', 'platform', 'service'],
-                    'process': ['efficiency', 'automation', 'optimization', 'workflow']
-                }
-
-                for area, keywords in innovation_areas.items():
-                    if any(keyword in content_lower for keyword in keywords):
-                        innovations.append({
-                            'area': area,
-                            'content': doc.page_content[:100] + "..." if len(doc.page_content) > 100 else doc.page_content,
-                            'score': score
-                        })
-                        break
-                
-            return innovations
-        
-        except Exception as e:
-            self.logger.warning(f"Innovation opportunities analysis failed for {company}: {e}")
-            return []
-        
-    def _format_opportunity_assessment_report(self, opportunity_analysis: Dict[str, Any], company: str, market_segments: List[str]) -> str:
-        """Format comprehensive opportunity assessment report"""
-
-        report_parts = [
-            f"🎯 Market Opportunity Assessment: {company}",
-            f"Analyzed Segments: {', '.join(market_segments)}",
-            f"Assessment Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            ""
-        ]
-
-        # Growth Segments
-        growth_segments = opportunity_analysis['growth_segments']
-        if growth_segments:
-            report_parts.append("🚀 High-Growth Market Segments:")
-
-            for segment in growth_segments:
-                report_parts.append(f" •{segment['segment']}:")
-
-                if segment['key_insights']:
-                    report_parts.append(f" - {segment['key_insights'][0]['content']}")
-
-                if segment['barriers']:
-                    report_parts.append(f" - Barriers: {len(segment['barriers'])} identified")
-
-        else:
-            report_parts.append("🚀 High-Growth Segments: No high-growth segments identified")
-
-        # Emerging Markets
-        emerging_markets = opportunity_analysis['emerging_markets']
-        if emerging_markets:
-            report_parts.append("")
-            report_parts.append("🌱 Emerging Market Opportunities:")
-
-            for market in emerging_markets:
-                report_parts.append(f"• {market['segment']} (Early-stage opportunity)")
-
-        # Innovation Areas
-        innovation_areas = opportunity_analysis['innovation_areas']
-        if innovation_areas:
-            report_parts.append("")
-            report_parts.append("💡 Innovation & R&D Opportunities:")
-
-            innovation_by_area = {}
-            for innovation in innovation_areas:
-                area = innovation['area']
-                if area not in innovation_by_area:
-                    innovation_by_area[area] = []
-                innovation_by_area[area].append(innovation)
-
-            for area, innovations in innovation_by_area.items():
-                report_parts.append(f" •  {area.title()}: {len(innovations)} opportunity(s)")
-
-        # Strategic Recommendations
-        report_parts.append("")
-        report_parts.append("📈 Strategic Growth Recommendations:")
-
-        total_opportunities = (len(growth_segments) + len(emerging_markets)) + len(innovation_areas)
-
-        if total_opportunities > 8:
-            report_parts.append("  • 🎯 Multiple high-potential opportunities identified")
-            report_parts.append("  • Prioritize based on strategic alignment and resources")
-            report_parts.append("  • Consider phased market entry approach")
-
-        elif total_opportunities > 3:
-            report_parts.append("  • 📊 Solid opportunity portfolio available")
-            report_parts.append("  • Focus on 2-3 most promising segments")
-            report_parts.append("  • Build capabilities for selected opportunities")
-
-        else:
-            report_parts.append("  • 🔍 Limited opportunity data available")
-            report_parts.append("  • Conduct deeper market research")
-            report_parts.append("  • Explore adjacent market expansion")
-
-        return "\n".join(report_parts)
-    
     async def analyze_company_market(self, company_ticker: str, additional_context: str = "") -> Dict[str, Any]:
         """Run comprehensive market analysis with production-grade error handling"""
 
@@ -940,7 +265,7 @@ class MarketAgentTeam:
             'success': False
         }
     
-    def _process_market_summary(self, result, company: str) -> Dict[str, Any]:
+    def _process_market_result(self, result, company: str) -> Dict[str, Any]:
         """Process and validate market analysis results"""
 
         try:
@@ -1001,107 +326,6 @@ class MarketAgentTeam:
         
         except Exception as e:
             self.logger.error(f"Error during market cleanup: {e}")
-            
-    def _create_agents(self):
-        """Create market analysis agents with specialized roles"""
-
-        # Industry Analyst - Market trends and competitive landscape
-        self.industry_analyst = AssistantAgent(
-            name="industry_analyst",
-            model_client=self.model_client,
-            model_context=BufferedChatCompletionContext(buffer_size=15),
-            tools = [self.analyze_industry_trends, self.research_competitive_landscape],
-            system_message="""You are an Industry Analysis Specialist. Your responsibilities:
-
-            1. **Market Trend Analysis**: Use analyze_industry_trends() to examine industry dynamics
-            2. **Competitive Landscape**: Use research_competitive_landscape() to analyze competitors
-            3. **Growth Pattern Analysis**: Identify market growth drivers and patterns
-            4. **Sector Performance**: Evaluate industry sector performance and outlook
-
-            **Key Focus Areas:**
-            - Industry growth rates and market size
-            - Competitive positioning and market share
-            - Emerging trends and disruptions
-            - Regulatory and macroeconomic impacts
-
-            **Tools Available:**
-            - analyze_industry_trends(company, industry): Analyze market trends and positioning
-            - research_competitive_landscape(company, competitors): Research competitive environment
-
-            Use 'INDUSTRY_ANALYSIS_COMPLETE' when industry analysis is finished.
-            """
-        )
-
-        # Market Researcher - Industry reports and market intelligence
-        self.market_researcher = AssistantAgent(
-            name = "market_researcher",
-            model_client=self.model_client,
-            model_context=BufferedChatCompletionContext(buffer_size=12),
-            tools = [self.assess_market_opportunities],
-            system_message="""You are a Market Research Specialist. Your responsibilities:
-
-            1. **Opportunity Assessment**: Use assess_market_opportunities() to identify growth areas
-            2. **Market Intelligence**: Gather and analyze market data and reports
-            3. **Segment Analysis**: Evaluate specific market segments and niches
-            4. **Growth Forecasting**: Project market growth and opportunity sizing
-
-            **Key Analysis Areas:**
-            - Market opportunity identification and sizing
-            - Segment growth potential and attractiveness
-            - Customer needs and market gaps
-            - Innovation and emerging market trends
-
-            **Tools Available:**
-            - assess_market_opportunities(company, segments): Evaluate growth opportunities
-
-            Use 'MARKET_RESEARCH_COMPLETE' when market research is finished.
-            """
-        )
-
-        # Competitive Analyst - Peer comparison and positioning
-        self.competitive_analyst = AssistantAgent(
-            name = "competitive_analyst",
-            model_client = self.model_client,
-            model_context=BufferedChatCompletionContext(buffer_size=10),
-            tools = [self.research_competitive_landscape, self.analyze_industry_trends],
-            system_message="""You are a Competitive Intelligence Specialist. Your responsibilities:
-
-            1. **Competitive Benchmarking**: Compare company performance against peers
-            2. **Positioning Analysis**: Evaluate competitive positioning and differentiation
-            3. **Strategic Assessment**: Analyze competitor strategies and capabilities
-            4. **Threat Analysis**: Identify competitive threats and market pressures
-
-            **Review Checklist:**
-            - Comprehensive competitor profiling
-            - SWOT analysis (Strengths, Weaknesses, Opportunities, Threats)
-            - Market share dynamics and trends
-            - Strategic implications and recommendations
-
-            **Tools Available:**
-            - research_competitive_landscape(company, competitors): Analyze competitors
-            - analyze_industry_trends(company, industry): Contextual industry analysis
-
-            Use 'COMPETITIVE_ANALYSIS_COMPLETE' when competitive analysis is finished.
-            """
-        )
-
-    def _create_team(self):
-        """Create the market analysis team with robust termination conditions"""
-
-        termination_conditions = (
-            TextMentionTermination("MARKET_ANALYSIS_COMPLETE") |
-            TextMentionTermination("INDUSTRY_ANALYSIS_COMPLETE") |
-            TextMentionTermination("COMPETITIVE_ANALYSIS_COMPLETE") |
-            TextMentionTermination("MARKET_RESEARCH_COMPLETE") |
-            TextMentionTermination("TERMINATE") |
-            MaxMessageTermination(max_messages=25)
-        )
-
-        self.team = RoundRobinGroupChat(
-            [self.industry_analyst, self.market_researcher, self.competitive_analyst],
-            termination_condition=termination_conditions,
-            max_turns=20
-        )
 
 # Production-grade factory function for Market Agent Team
 async def create_market_team(
@@ -1148,50 +372,52 @@ async def create_market_team(
         logging.error(f"Failed to create market agent team: {e}")
         raise
 
+# Production-ready main execution
+async def main():
+    """Production-grade example usage"""
 
+    # Configure logging for production
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 
+    market_team = None
+    try:
+        # Create market agent team
+        market_team = await create_market_team()  
 
-        
+        # Test with a company
+        company = "AAPL"
 
+        # Ensure data availability
+        data_ready = await market_team._ensure_market_data(company)
+        if not data_ready:
+            print(f"❌ Cannot analyze {company} - data unavailable")
+            return
 
+        # Run comprehensive analysis
+        result = await market_team.analyze_company_market(
+            company_ticker=company,
+            additional_context="Focus on competitive positioning and emerging opportunities"
+        ) 
 
+        # Display results
+        if result.get('success'):
+            print(f"✅ Analysis completed for {result['company']}")
+            print(f"📊 Summary: {result['summary']}")
+            print(f"⏱️  Timestamp: {result['timestamp']}")
+            print(f"📝 Messages: {result['message_count']}")
 
+        else:
+            print(f"❌ Analysis failed: {result.get('error', 'unknown error')}")   
 
+    except Exception as e:
+        logging.error(f"Main execution failed: {e}")
 
+    finally:
+        if market_team:
+            await market_team.close()      
 
-
-
-
-        
-        
-            
-
-
-
-
-
-
-
-        
-
-
-        
-  
-
-
-       
-
-
-            
-
-
-
-                
-
-
-        
-
-
-
-    
-        
+if __name__ == "__main__":
+    asyncio.run(main())

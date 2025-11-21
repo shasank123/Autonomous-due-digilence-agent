@@ -1,3 +1,4 @@
+# src/data/collectors/sec_edgar.py
 import json
 import requests
 import time

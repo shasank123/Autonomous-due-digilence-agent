@@ -1,3 +1,4 @@
+# src/data/collectors/company_resolver.py
 import requests
 import json
 from typing import Optional, Dict

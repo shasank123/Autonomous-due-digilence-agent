@@ -50,7 +50,7 @@ class AnalysisState(TypedDict):
     warnings: Annotated[List[str], add]
 
 
-class DueDigillenceOrchestator:
+class DueDiligenceOrchestrator:
     """
     Production orchestrator using latest LangGraph patterns
     """

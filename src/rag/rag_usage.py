@@ -1,12 +1,11 @@
-from rag.core import Ragsystem
+from rag.core import ProductionRAGSystem
 from langchain_core.documents import Document
 
 def Huggingface_rag():
     print("huggingface demo")
-    rag_system = Ragsystem(
+    rag_system = ProductionRAGSystem(
         persist_directory="./data/vector_stores/financial_hf",
-        embedding_type="huggingface",
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+        embedding_type="huggingface"
     )
 
     documents = [
@@ -20,7 +19,7 @@ def Huggingface_rag():
             )
         ]
 
-    doc_ids = rag_system.add_documents(documents)
+    doc_ids = rag_system.add_company_data(documents)
     print(f" added {len(doc_ids)} documents")
 
     results = rag_system.query(question="what is apple's revenue in 2024?")
@@ -32,7 +31,7 @@ def Huggingface_rag():
 def Openai_rag():
     print("open ai demo")
 
-    rag_system = Ragsystem(
+    rag_system = ProductionRAGSystem(
         persist_directory="./data/vector_stores/financial_openai",
         embedding_type="openai"
     )
@@ -48,7 +47,7 @@ def Openai_rag():
         )
     ]
 
-    rag_system.add_documents(documents)
+    rag_system.add_company_data(documents)
     results = rag_system.query(question="how many vehicles did tesla deliver in Q4 2024?")
     for doc in results:
         print(f" openai_result: {doc.page_content}, (source: {doc.metadata['source']})")
@@ -56,5 +55,10 @@ def Openai_rag():
     return rag_system
 
 if __name__ == "__main__":
+    # Ensure directories exist
+    import os
+    os.makedirs("./data/vector_stores/financial_hf", exist_ok=True)
+    os.makedirs("./data/vector_stores/financial_openai", exist_ok=True)
+    
     hf_rag = Huggingface_rag()
-    oa_rag = Openai_rag()
+    # oa_rag = Openai_rag() # Requires API key

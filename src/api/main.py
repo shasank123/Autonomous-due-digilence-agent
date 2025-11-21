@@ -57,7 +57,7 @@ try:
     from data.collectors.sec_edgar import SECDataCollector
     from data.collectors.company_resolver import CompanyResolver
     from data.processors.document_parser import DocumentProcessor
-    from agents.orchestrator import DueDigillenceOrchestator
+    from agents.orchestrator import DueDiligenceOrchestrator
 
 except ImportError as e:
     logger.error(f"Failed to import project modules {e}")
@@ -79,7 +79,7 @@ class SystemComponents:
     def __init__(self):
         self.financial_agent_team : Optional[FinancialAgentTeam] = None
         self.rag_system : Optional[ProductionRAGSystem] = None
-        self.orchestator : Optional[DueDigillenceOrchestator] = None
+        self.orchestator : Optional[DueDiligenceOrchestrator] = None
         self.sec_collector: Optional[SECDataCollector] = None
         self.company_resolver: Optional[CompanyResolver] = None
         self.document_processor: Optional[DocumentProcessor] = None
@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
         
         # Initialize orchestrator
         try:
-            components.orchestator = DueDigillenceOrchestator()
+            components.orchestator = DueDiligenceOrchestrator()
             components.status['orchestator'] = ComponentStatus.HEALTHY
             logger.info("✅ Analysis Orchestrator initialized")
         
@@ -221,7 +221,6 @@ app = FastAPI(
 )
 
 # Prometheus metrics with duplicate protection
-"""
 _metrics_initialized = False
 
 if not hasattr(app, 'metrics_initialized'):
@@ -229,7 +228,7 @@ if not hasattr(app, 'metrics_initialized'):
     REQUEST_DURATION = Histogram('api_request_duration_seconds', 'API request duration')
     ACTIVE_ANALYSES = Gauge('active_analyses', 'Number of active analyses')
     SESSION_COUNT = Gauge('analysis_sessions_total', 'Total analysis sessions')
-    app.metrics_initialized = True"""
+    app.metrics_initialized = True
 
 # Add rate limiting to app state
 app.state.limiter = limiter
@@ -835,7 +834,7 @@ async def metrics():
     return prometheus_client.generate_latest()
 
 # Store app start time for uptime calculation
-app_start_time = time.time()
+
 
 load_dotenv()
 

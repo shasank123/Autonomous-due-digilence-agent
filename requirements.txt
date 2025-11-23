@@ -56,4 +56,4 @@ redis==5.0.0
 prometheus-client==0.19.0
 slowapi==0.1.9
 streamlit>=1.30.0
-plotly>=5.18.0
+plotly>=5.17.0

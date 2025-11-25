@@ -2,6 +2,9 @@
 
 AI-powered multi-agent system for automated company financial analysis using SEC data.
 
+## System Architecture
+![Architecture Diagram](docs/project_architecture.png)
+
 ## 🚀 Features
 
 - **10,000+ Companies**: Analyze any public company automatically

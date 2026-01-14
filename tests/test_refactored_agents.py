@@ -24,7 +24,7 @@ class TestRefactoredAgents(unittest.TestCase):
         self.assertTrue(hasattr(agent, 'financial_researcher'))
         self.assertTrue(hasattr(agent, 'financial_analyst'))
         self.assertTrue(hasattr(agent, 'financial_reviewer'))
-        print("✅ FinancialAgentTeam initialized successfully with FinancialTools")
+        print("[OK] FinancialAgentTeam initialized successfully with FinancialTools")
 
     def test_market_agent_initialization(self):
         agent = MarketAgentTeam(self.mock_model_client, self.mock_rag_system)
@@ -32,7 +32,7 @@ class TestRefactoredAgents(unittest.TestCase):
         self.assertTrue(hasattr(agent, 'industry_analyst'))
         self.assertTrue(hasattr(agent, 'market_researcher'))
         self.assertTrue(hasattr(agent, 'competitive_analyst'))
-        print("✅ MarketAgentTeam initialized successfully with MarketTools")
+        print("[OK] MarketAgentTeam initialized successfully with MarketTools")
 
     def test_legal_agent_initialization(self):
         agent = LegalAgentTeam(self.mock_model_client, self.mock_rag_system)
@@ -40,7 +40,7 @@ class TestRefactoredAgents(unittest.TestCase):
         self.assertTrue(hasattr(agent, 'compliance_analyst'))
         self.assertTrue(hasattr(agent, 'risk_assessor'))
         self.assertTrue(hasattr(agent, 'contract_reviewer'))
-        print("✅ LegalAgentTeam initialized successfully with LegalTools")
+        print("[OK] LegalAgentTeam initialized successfully with LegalTools")
 
 if __name__ == '__main__':
     unittest.main()

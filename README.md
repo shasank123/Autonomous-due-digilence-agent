@@ -1,18 +1,18 @@
-# 🤖 Autonomous Due Diligence Agent
+# Autonomous Due Diligence Agent
 
 AI-powered multi-agent system for automated company financial analysis using SEC data.
 
 ## System Architecture
 ![Architecture Diagram](docs/project_architecture.png)
 
-## 🚀 Features
+## Features
 
 - **10,000+ Companies**: Analyze any public company automatically
 - **500+ Financial Metrics**: Revenue, assets, ratios, and more
 - **AI Agents**: Specialized financial, legal, and market analysts
 - **SEC Integration**: Real-time data from U.S. Securities and Exchange Commission
 
-## 📊 Data Sources
+## Data Sources
 
 ### SEC Company Tickers
 ```json
@@ -83,7 +83,7 @@ AI-powered multi-agent system for automated company financial analysis using SEC
   }
 }
 
-## 🛠️ Installation
+## Installation
 ```bash
 
 git clone https://github.com/yourusername/autonomous-due-diligence-agent
@@ -92,14 +92,14 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 
-🎯 Usage
+[TARGET] Usage
 
 from src.data.collectors.sec_edgar import SECDataCollector
 
 collector = SECDataCollector()
 data = collector.get_company_facts("AAPL")
 
-📁 Project Structure
+[FOLDER] Project Structure
 
 src/
 ├── data/collectors/     # SEC API integration
@@ -107,7 +107,7 @@ src/
 ├── rag/                # Vector search system
 └── agents/             # AI agent orchestration
 
-## 🧪 Testing
+## Testing
 
 ### Data Pipeline Tests:
 

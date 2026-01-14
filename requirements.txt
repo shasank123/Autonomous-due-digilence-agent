@@ -1,6 +1,5 @@
 chromadb>=0.4.22
 pytest>=7.4.0
-torch>=2.0.0
 transformers>=4.30.0
 
 

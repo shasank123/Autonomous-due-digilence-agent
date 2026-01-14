@@ -1,469 +1,231 @@
 # src/data/processors/document_parser.py
 from langchain_core.documents import Document
-from typing import List, Dict
-import json
+from typing import List, Dict, Any, Optional
 import logging
+import re
 
 class DocumentProcessor:
+    """
+    Production Document Processor.
+    Robustly handles SEC XBRL tag variations (e.g. Revenue vs SalesRevenueNet).
+    """
     
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-       
-    """
-    Processes ALL financial metrics and calculates ratios
-    """
 
     def process_sec_facts(self, company_facts: Dict, ticker: str) -> List[Document]:
-      
-        # Converts ALL SEC financial data into comprehensive documents
         documents = []
-
-        if not company_facts or 'facts' not in company_facts:       
+        if not company_facts or 'facts' not in company_facts:
             return documents
         
-        # Extract company info
-        company_info = self._extract_company_info(company_facts,ticker)
-        documents.extend(company_info)
+        try:
+            # 1. Base Info
+            documents.extend(self._extract_company_info(company_facts, ticker))
+            # 2. Financial Metrics (Raw)
+            documents.extend(self._process_financial_metrics(company_facts, ticker))
+            # 3. Ratios (Calculated)
+            documents.extend(self._compute_financial_ratios(company_facts, ticker))
+            # 4. Derived Context (Market/Legal)
+            documents.extend(self._generate_derived_market_context(company_facts, ticker))
+            documents.extend(self._generate_derived_legal_context(company_facts, ticker))
 
-        # Process ALL financial metrics
-        financial_docs = self._process_financial_metrics(company_facts,ticker)
-        documents.extend(financial_docs)
+            self.logger.info(f"Created {len(documents)} documents for {ticker}")
+            return documents
+        except Exception as e:
+            self.logger.error(f"Error processing {ticker}: {e}")
+            return documents
 
-        # Calculate and add financial ratios
-        ratio_docs = self._compute_financial_ratios(company_facts,ticker)
-        documents.extend(ratio_docs)
-
-        print(f" created {len(documents)} comprehensive documents for {ticker}")
-        return documents
-    
     def _extract_company_info(self, company_facts: Dict, ticker: str) -> List[Document]:
+        entity = company_facts.get('entityName', 'Unknown')
+        sic = company_facts.get('sic', 'Unknown')
+        cat = company_facts.get('category', 'Unknown')
+        
+        content = f"Company: {entity} ({ticker})\nSIC: {sic}\nSector: {cat}\nSource: SEC EDGAR"
+        return [Document(page_content=content, metadata={"company": ticker, "doc_type": "company_info"})]
 
-        #Extract company entity information
-        documents = []
+    def _process_financial_metrics(self, facts: Dict, ticker: str) -> List[Document]:
+        docs = []
+        us_gaap = facts.get('facts', {}).get('us-gaap', {})
+        
+        # Iterate through ALL gaap keys to find relevant ones
+        for tag, data in us_gaap.items():
+            # Filter for interesting tags (Revenue, Income, Assets, etc.)
+            # Note: Include both 'Liability' and 'Liabilities' because Python substring check is case-sensitive
+            if any(x in tag for x in ['Revenue', 'Income', 'Asset', 'Liabilities', 'Liability', 'Equity', 'Stockholders', 'Cash', 'Profit']):
+                docs.extend(self._create_metric_documents(tag, data, ticker))
+        return docs
 
-        entity_info = {
-            "name": "unknown",
-            "sic": "unknown",
-            "category": "unknown",
-        }
+    def _create_metric_documents(self, tag: str, data: Dict, ticker: str) -> List[Document]:
+        docs = []
+        if 'units' not in data or 'USD' not in data['units']: return []
+        
+        # Sort by date (newest first)
+        values = sorted(data['units']['USD'], key=lambda x: x.get('end', ''), reverse=True)
+        
+        # Take top 3 unique periods
+        seen_periods = set()
+        for val in values:
+            p = val.get('end')
+            if p in seen_periods: continue
+            seen_periods.add(p)
+            if len(seen_periods) > 3: break
+            
+            content = f"Company: {ticker}\nMetric: {tag}\nValue: {val.get('val', 0)} USD\nPeriod: {p}"
+            docs.append(Document(
+                page_content=content,
+                metadata={
+                    "company": ticker, 
+                    "metric": tag, 
+                    "period": p, 
+                    "value": val.get('val', 0),
+                    "doc_type": "financial_metric"
+                }
+            ))
+        return docs
 
-        if 'entityName' in company_facts:
-            entity_info['name'] = company_facts['entityName']
-
-        if 'sic' in company_facts:
-            entity_info['sic'] = company_facts['sic']
-
-        if 'category' in company_facts:
-            entity_info['category'] = company_facts['category']
-
-        content = f"""
-        company_name: {entity_info['name']} ({ticker})
-        SIC Industry Code: {entity_info['sic']}
-        Business Category: {entity_info['category']}
-        Data Source: U.S. Securities and Exchange Commission (SEC)
+    def _extract_latest_values(self, facts: Dict) -> Dict[str, float]:
         """
-        document = Document(
-            page_content=content.strip(),
-            metadata={
-                "source": "sec",
-                "company": ticker,
-                "doc_type": "company_info",
-                "data_type": "entity_information"
-            }
-        )
-
-        documents.append(document)
-        return documents
-    
-    def _process_financial_metrics(self, company_facts: Dict, ticker: str) -> List[Document]:
-
-        documents = []
-        
-        if 'us-gaap' not in company_facts.get('facts', {}):
-            return documents
-        
-        financial_facts = company_facts['facts']['us-gaap']
-
-        key_metrics = ['Revenue', 'Assets', 'Liabilities', 'NetIncomeLoss',
-            'CashAndCashEquivalents', 'Inventory', 'PropertyPlantEquipment',
-            'LongTermDebt', 'StockholdersEquity', 'EarningsPerShareBasic',
-            'CostOfRevenue', 'OperatingIncomeLoss', 'ResearchAndDevelopmentExpense',
-            'SalesRevenueGoodsNet', 'SalesRevenueServicesNet', 'GrossProfit',
-            'InterestExpense', 'IncomeTaxExpenseBenefit', 'DepreciationDepletionAndAmortization']
-        
-        for metric in key_metrics:
-            if metric in financial_facts:
-                metric_data = financial_facts[metric]
-                docs = self._create_metric_documents(metric, metric_data, ticker)
-                documents.extend(docs)
-        return documents
-    
-    def _create_metric_documents(self, metric: str, metric_data: Dict, ticker: str) -> List[Document]:
-        #Create documents for a specific financial metric
-        documents = []
-
-        if 'units' not in metric_data:
-            return documents
-        
-        for unit, values in metric_data['units'].items():
-
-            # Take latest 3 periods for trend analysis
-            for value in values[:3]:
-                content = self._format_financial_content(metric, ticker, unit, value)
-
-                document = Document(
-                    page_content=content,
-                    metadata={
-                        "source": "sec",
-                        "company": ticker,
-                        "metric": metric,
-                        "unit": unit,
-                        "period": value.get('end', ''),
-                        "filed": value.get('filed', ''),
-                        "form": value.get('form', ''),
-                        "doc_type": "financial_metric",
-                        "data_type": "raw_financial"
-                    } 
-                )
-                documents.append(document)
-
-        return documents
-    
-    def _format_financial_content(self, metric: str, ticker: str, unit: str, value: Dict) -> str:
-        #Format financial data into readable content
-        return f"""
-        Company: {ticker}
-        Financial Metric: {self._humanize_metric_name(metric)}
-        Value: {value.get('val', 'N/A')} {unit}
-        Period End: {value.get('end', 'N/A')}
-        Filed Date: {value.get('filed', 'N/A')}
-        Form Type: {value.get('form', 'N/A')}
-        Context: {value.get('frame', 'As Reported')}
+        Robust extraction that checks multiple possible XBRL tags for each concept.
         """
-    
-    def _humanize_metric_name(self, metric: str) -> str:
-        #Convert metric names to human-readable format
-        replacements = {
-            'Revenue': 'Total Revenue',
-            'NetIncomeLoss': 'Net Income/Loss',
-            'CashAndCashEquivalents': 'Cash & Cash Equivalents',
-            'PropertyPlantEquipment': 'Property, Plant & Equipment',
-            'StockholdersEquity': "Stockholders' Equity",
-            'EarningsPerShareBasic': 'Basic Earnings Per Share (EPS)',
-            'ResearchAndDevelopmentExpense': 'Research & Development Expense'
-        }
-
-        return replacements.get(metric, metric.replace('_', '').title())
-
-    
-    def _compute_financial_ratios(self, company_facts: Dict, ticker: str) -> List[Document]:
-        #Calculate and create documents for financial ratios
-        documents = []
-        
-        # Extract latest values for ratio calculation
-        financial_data = self._extract_latest_values(company_facts)
-        print(f"DEBUG: Extracted financial data for ratios: {financial_data}")  # Debug
-
-        #Calculate key financial ratios
-        ratios = self._compute_ratios(financial_data)
-        print(f"DEBUG: Computed ratios: {ratios}")  # Debug line
-
-        # Create ratio documents
-        for ratio_name, ratio_value in ratios.items():
-            if ratio_value is not None:
-                content = f"""
-                company = {ticker},
-                Financial Ratio: {ratio_name}
-                Value: {ratio_value:.2f}
-                Interpretation: {self._get_ratio_interpretation(ratio_name, ratio_value)}
-                Calculation Period: Latest Available Data
-                """
-
-                document = Document(
-                    page_content= content.strip(),
-                    metadata = {
-                        "source": "calculated",
-                        "company": ticker, 
-                        "metric": ratio_name,
-                        "doc_type": "financial_ratio",
-                        "data_type": "calculated_metric"
-                    }
-                )
-                documents.append(document)
-        print(f"DEBUG: Created {len(documents)} ratio documents")  # Debug line
-        return documents
-    
-    def _extract_latest_values(self, company_facts: Dict) -> Dict[str, float]:
-
-        #Extract latest values for ratio calculations
         values = {}
-
-        if 'us-gaap' not in company_facts.get('facts', {}):
-            return values
+        us_gaap = facts.get('facts', {}).get('us-gaap', {})
         
-        financial_facts = company_facts['facts']['us-gaap']
-
-        # Map of metrics we need for ratios
-        metric_map = {
-            'Revenue': 'revenue',
-            'NetIncomeLoss': 'net_income', 
-            'Assets': 'total_assets',
-            'Liabilities': 'total_liabilities',
-            'StockholdersEquity': 'equity',
-            'CashAndCashEquivalents': 'cash',
-            'CurrentAssets': 'current_assets',
-            'CurrentLiabilities': 'current_liabilities'
+        # Priority list of tags for each concept (Order matters!)
+        mappings = {
+            'revenue': [
+                'RevenueFromContractWithCustomerExcludingAssessedTax', 
+                'SalesRevenueNet', 
+                'Revenues', 
+                'Revenue',
+                'SalesRevenueGoodsNet'
+            ],
+            'net_income': [
+                'NetIncomeLoss', 
+                'NetIncomeLossAvailableToCommonStockholdersBasic', 
+                'ProfitLoss'
+            ],
+            'total_assets': ['Assets'],
+            'total_liabilities': ['Liabilities'],
+            'equity': [
+                'StockholdersEquity', 
+                'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest'
+            ],
+            'current_assets': ['AssetsCurrent'],
+            'current_liabilities': ['LiabilitiesCurrent']
         }
 
-        for metric_key, value_key in metric_map.items():
-            if metric_key in financial_facts and 'USD' in financial_facts[metric_key].get('units',{}):
-                usd_values= financial_facts[metric_key]['units']['USD']
-
-                if usd_values:
-                    values[value_key] = usd_values[0]['val']
-
+        for key, potential_tags in mappings.items():
+            for tag in potential_tags:
+                if tag in us_gaap and 'units' in us_gaap[tag] and 'USD' in us_gaap[tag]['units']:
+                    # Get the latest value
+                    items = sorted(us_gaap[tag]['units']['USD'], key=lambda x: x.get('end', ''), reverse=True)
+                    if items:
+                        values[key] = float(items[0]['val'])
+                        break # Stop looking for this concept once found
+        
         return values
 
-    def _compute_ratios(self, financial_data: Dict[str, float]) -> Dict[str, float]:
-        
-        #Compute financial ratios from extracted data
+    def _compute_financial_ratios(self, facts: Dict, ticker: str) -> List[Document]:
+        data = self._extract_latest_values(facts)
         ratios = {}
+        
+        # Safe Math Helpers
+        def safe_div(n, d): return n / d if d else 0
 
-        try:
-            # Profitability Ratios
-            if 'net_income' in financial_data and 'total_assets' in financial_data:
-                if financial_data['total_assets'] != 0:
-                    ratios['Return on Assets (ROA)'] = (financial_data['net_income'] / financial_data['total_assets']) * 100
-                else:
-                    self.logger.warning("Total assets is zero, skipping ROA calculation")
-                                  
+        if 'net_income' in data and 'total_assets' in data:
+            ratios['ROA'] = safe_div(data['net_income'], data['total_assets']) * 100
+        
+        if 'net_income' in data and 'equity' in data:
+            ratios['ROE'] = safe_div(data['net_income'], data['equity']) * 100
             
-            if 'net_income' in financial_data and 'equity' in financial_data:
-                if financial_data['equity'] != 0:
-                    ratios['Return on Equity (ROE)'] = (financial_data['net_income'] / financial_data['equity']) * 100
-                else:
-                    self.logger.warning("Equity is zero, skipping ROE calculation")
+        if 'total_liabilities' in data and 'equity' in data:
+            ratios['Debt to Equity'] = safe_div(data['total_liabilities'], data['equity'])
+
+        if 'current_assets' in data and 'current_liabilities' in data:
+            ratios['Current Ratio'] = safe_div(data['current_assets'], data['current_liabilities'])
+
+        docs = []
+        for k, v in ratios.items():
+            content = f"Ratio: {k}\nValue: {v:.2f}\nInterpretation: {self._get_ratio_interpretation(k, v)}"
+            docs.append(Document(page_content=content, metadata={"company": ticker, "metric": k, "doc_type": "financial_ratio"}))
+        return docs
+
+    def _generate_derived_market_context(self, facts: Dict, ticker: str) -> List[Document]:
+        data = self._extract_latest_values(facts)
+        rev = data.get('revenue', 0)
         
-            # Liquidity Ratios
-            if 'current_assets' in financial_data and 'current_liabilities' in financial_data:
-                if financial_data['current_liabilities'] != 0:
-                    ratios['Current Ratio'] = financial_data['current_assets'] / financial_data['current_liabilities']
-                else:
-                    self.logger.warning("Current liabilities is zero, skipping Current Ratio calculation")
+        # Robust Market Cap Logic
+        pos = "Small Cap/Niche"
+        if rev > 100_000_000_000: pos = "Mega Cap/Market Leader"
+        elif rev > 10_000_000_000: pos = "Large Cap"
+        elif rev > 1_000_000_000: pos = "Mid Cap"
         
-            # Solvency Ratios
-            if 'total_liabilities' in financial_data and 'equity' in financial_data:
-                if financial_data['equity'] != 0:
-                    ratios['Debt to Equity'] = financial_data['total_liabilities'] / financial_data['equity']
-                else:
-                    self.logger.warning("Equity is zero, skipping Debt to Equity calculation")
+        # Determine sector from SIC code or category
+        sector = self._get_sector_from_sic(facts.get('sic', '')) or facts.get('category') or 'Technology'
         
-            # Efficiency Ratios
-            if 'revenue' in financial_data and 'total_assets' in financial_data:
-                if financial_data['total_assets'] != 0:
-                    ratios['Asset Turnover'] = financial_data['revenue'] / financial_data['total_assets']
-                else:
-                    self.logger.warning("Total assets is zero, skipping Asset Turnover calculation")
-
-            ratios_to_remove = []
-            for ratio_name, ratio_value in ratios.items():
-                if ratio_value == float('inf') or ratio_value == float('-inf'):
-                    self.logger.warning(f"invalid ratio value for {ratio_name}: {ratio_value}")
-                    ratios_to_remove.append(ratio_name)
-
-            for ratio_name in ratios_to_remove:
-                del ratios[ratio_name]
-            
-        except (ZeroDivisionError, KeyError) as e:
-            self.logger.error(f"Unexpected error in ratio calculation: {e}")
-            return ratios
-        
-        except Exception as e:
-            self.logger.error(f"Unexpected error in ratio calculation: {e}")
-            return {}
-        
-        self.logger.info(f"calculated {len(ratios)} financial ratios")
-        return ratios
-
-             
-    def _get_ratio_interpretation(self, ratio_name: str, value: float) -> str:
-
-        interpretations = {
-            'Return on Assets (ROA)': "Good > 5%, Excellent > 10%" if value > 5 else "Needs improvement < 5%",
-            'Return on Equity (ROE)': "Good > 15%, Excellent > 20%" if value > 15 else "Needs improvement < 15%", 
-            'Current Ratio': "Healthy > 1.5, Risk < 1.0" if value > 1.5 else "Potential liquidity risk < 1.0",
-            'Debt to Equity': "Conservative < 0.5, High > 2.0" if value < 0.5 else "Moderate leverage 0.5-2.0" if value <= 2 else "High leverage > 2.0"
-        }
-        
-        return interpretations.get(ratio_name, "Industry context needed for full interpretation")
-
-
-
-if __name__ == "__main__":
-    processor = DocumentProcessor()
-    print("🧪 Testing Document Processor...")
-
-    # Test 1: Create more complete sample SEC data
-    sample_sec_data = {
-        "entityName": "TEST COMPANY INC",
-        "sic": "7372",
-        "category": "Technology Services",
-        "facts": {
-            "us-gaap": {
-                "Revenue": {
-                    "units": {
-                        "USD": [
-                            {"val": 1000000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"},
-                            {"val": 900000000, "end": "2022-12-31", "form": "10-K", "filed": "2023-01-31"}
-                        ]
-                    }
-                },
-                "Assets": {
-                    "units": {
-                        "USD": [
-                            {"val": 500000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                },
-                "NetIncomeLoss": {
-                    "units": {
-                        "USD": [
-                            {"val": 150000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                },
-                "Liabilities": {
-                    "units": {
-                        "USD": [
-                            {"val": 200000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                },
-                "StockholdersEquity": {
-                    "units": {
-                        "USD": [
-                            {"val": 300000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                },
-                "CurrentAssets": {
-                    "units": {
-                        "USD": [
-                            {"val": 250000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                },
-                "CurrentLiabilities": {
-                    "units": {
-                        "USD": [
-                            {"val": 100000000, "end": "2023-12-31", "form": "10-K", "filed": "2024-01-31"}
-                        ]
-                    }
-                }
-            }
-        }
-    }
-
-    # Test 2: Process documents
-    print("1. Testing document processing...")
-    documents = processor.process_sec_facts(sample_sec_data, "TEST")
-    print(f"✅ Created {len(documents)} documents")
-
-     # Test 3: Show document samples
-    print("\n2. Document samples:")
-    for i,doc in enumerate(documents[:3]):
-        print(f" document: {i+1}")
-        print(f" content: {doc.page_content[:100]}")
-        meta_data = {k: doc.metadata[k] for k in list(doc.metadata)[:3]}
-        print(f"  Metadata: {meta_data}")  # First 3 metadata items
-
-    print("\n Testing _create_metric_documents directly...")
-    sample_metric_data = {
-        "units": {
-            "USD": [
-                {"val": 1000000000, "end": "2023-12-31", "form": "10-K"},
-                {"val": 900000000, "end": "2022-12-31", "form": "10-K"}
-            ]
-        }
-    }
-    test_docs = processor._create_metric_documents("Revenue", sample_metric_data, "TEST")
-    print(f" created {len(test_docs)} metric documents")
-    if test_docs:
-        print(f" First doc metadata: {test_docs[0].metadata}")
-
-    # Test 4: Test ratio calculations
-    print("3. Testing ratio calculations...")
-    financial_data = processor._extract_latest_values(sample_sec_data)
-    print(f"   Extracted data: {financial_data}")
-
-    print("\n Testing ratio document creation...")
-    sample_sec_data = {
-    "facts": {
-        "us-gaap": {
-            "Revenue": {"units": {"USD": [{"val": 1000000000}]}},
-            "Assets": {"units": {"USD": [{"val": 500000000}]}},
-            "NetIncomeLoss": {"units": {"USD": [{"val": 250000000}]}},
-            "Liabilities": {"units": {"USD": [{"val": 200000000}]}},
-            "StockholdersEquity": {"units": {"USD": [{"val": 800000000}]}},
-            "CurrentAssets": {"units": {"USD": [{"val": 300000000}]}},
-            "CurrentLiabilities": {"units": {"USD": [{"val": 150000000}]}}
-        }
-    }
-}
-    ratio_docs = processor._compute_financial_ratios(sample_sec_data, "TEST")
-    print(f"   Created {len(ratio_docs)} ratio documents")
-    for doc in ratio_docs:
-        print(f" Ratio doc: {doc.metadata}")
-        print(f" Ratio doc content: {doc.page_content[:100]}...")
-
-    print("\n6. Testing _compute_ratios directly...")
-    sample_financial_data = {
-    'revenue': 1000000000,
-    'total_assets': 500000000,
-    'net_income': 250000000,
-    'equity': 800000000
-}
-
-    ratios = processor._compute_ratios(sample_financial_data)
-    print(f"   Calculated ratios: {ratios}")
-
-    # Test 5: Test individual components
-    print("\n4. Testing helper functions...")
-
-    # Test humanize metric name
-    test_metrics = ["Revenue", "NetIncomeLoss", "CashAndCashEquivalents"]
-    for metric in test_metrics:
-        humanized = processor._humanize_metric_name(metric)
-        print(f"  {metric} → {humanized}")
-
-    # Test ratio interpretation
-    test_ratios = {
-        "Return on Assets (ROA)": 8.5,
-        "Current Ratio": 1.2,
-        "Debt to Equity": 0.3
-    }
-
-    for ratio, value in test_ratios.items():
-        interpretation = processor._get_ratio_interpretation(ratio, value)
-        print(f" {ratio} ({value}): {interpretation}")
-
-    print("\n🎯 Document Processor tests completed!")
-
-
-        
-
-
-
-
-
-        
-
-
-
-
-
-
-
-
-                
+        content = (
+            f"Market Positioning for {ticker}:\n"
+            f"Based on annual revenue of ${rev:,.0f}, {ticker} is a {pos}.\n"
+            f"Sector: {sector}."
+        )
+        return [Document(page_content=content, metadata={"company": ticker, "sector": sector, "doc_type": "market_analysis"})]
     
+    def _get_sector_from_sic(self, sic: str) -> Optional[str]:
+        """Map SIC code to sector name"""
+        if not sic:
+            return None
+        
+        # SIC code categories - first 2 digits determine major sector
+        sic_prefix = str(sic)[:2] if sic else ''
+        
+        sic_mapping = {
+            # Technology & Electronics
+            '35': 'Computer & Office Equipment',
+            '36': 'Electronic Equipment',
+            '73': 'Business Services / Software',
+            '48': 'Communications',
+            # Finance
+            '60': 'Banking',
+            '61': 'Credit Institutions',
+            '62': 'Securities & Investments',
+            '63': 'Insurance',
+            '67': 'Holding Companies',
+            # Healthcare
+            '28': 'Chemicals & Pharmaceuticals',
+            '38': 'Medical Instruments',
+            '80': 'Health Services',
+            # Energy
+            '13': 'Oil & Gas Extraction',
+            '29': 'Petroleum Refining',
+            '49': 'Electric & Gas Utilities',
+            # Manufacturing
+            '37': 'Transportation Equipment',
+            '34': 'Fabricated Metal',
+            '33': 'Primary Metal',
+            # Retail
+            '52': 'Building Materials Retail',
+            '53': 'General Merchandise',
+            '54': 'Food Stores',
+            '56': 'Apparel Retail',
+            '57': 'Furniture & Home',
+            '59': 'Miscellaneous Retail',
+        }
+        
+        return sic_mapping.get(sic_prefix)
+
+    def _generate_derived_legal_context(self, facts: Dict, ticker: str) -> List[Document]:
+        data = self._extract_latest_values(facts)
+        debt = data.get('total_liabilities', 0)
+        eq = data.get('equity', 1)
+        lev = debt / eq if eq else 0
+        
+        risk = "High" if lev > 2.0 else "Low/Moderate"
+        content = f"Risk Assessment for {ticker}:\nFinancial Leverage Risk: {risk} (Debt/Equity: {lev:.2f})."
+        return [Document(page_content=content, metadata={"company": ticker, "doc_type": "legal_risk"})]
+
+    def _get_ratio_interpretation(self, name, val):
+        if name == 'ROA': return "Good" if val > 5 else "Weak"
+        if name == 'ROE': return "Strong" if val > 15 else "Average"
+        if name == 'Current Ratio': return "Healthy" if val > 1.5 else "Tight"
+        if name == 'Debt to Equity': return "Risky" if val > 2.0 else "Safe"
+        return "N/A"

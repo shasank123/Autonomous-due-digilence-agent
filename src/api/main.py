@@ -101,11 +101,11 @@ async def init_redis():
         retry_on_timeout=True
         )
         await components.redis_client.ping()
-        logger.info("✅ Redis connection established")
+        logger.info("[OK] Redis connection established")
         components.status['redis'] = ComponentStatus.HEALTHY
     
     except Exception as e:
-        logger.error(f"❌ Redis connection failed: {e}")
+        logger.error(f"[ERROR] Redis connection failed: {e}")
         components.status['redis'] = ComponentStatus.FAILED
         components.redis_client = None
 
@@ -118,39 +118,40 @@ async def lifespan(app: FastAPI):
     startup_success = False
 
     try:
-        logger.info("🚀 Initializing Financial Due Diligence API...")
+        logger.info("[LAUNCH] Initializing Financial Due Diligence API...")
         # Initialize Redis first
         await init_redis()
 
         # Initialize session manager
         if components.redis_client and components.status.get('redis') == ComponentStatus.HEALTHY:
             session_manager = RedisSessionManager(components.redis_client)
-            logger.info("✅ Redis Session Manager initialized")
+            logger.info("[OK] Redis Session Manager initialized")
         else:
-            logger.warning("⚠️ Redis unavailable - session management disabled")
+            logger.warning("[WARN] Redis unavailable - session management disabled")
             session_manager = None
 
         # Initialize RAG system
         try:
             components.rag_system = ProductionRAGSystem()
             components.status['rag_system'] = ComponentStatus.HEALTHY
-            logger.info("✅ RAG System initialized")
+            logger.info("[OK] RAG System initialized")
         
         except Exception as e:
-            logger.error(f"❌ RAG System initialization failed: {e}")
+            logger.error(f"[ERROR] RAG System initialization failed: {e}")
             components.status['rag_system'] = ComponentStatus.FAILED
             raise
 
         # Initialize financial agent team
         try:
             components.financial_agent_team = await create_financial_team(
-                rag_system=components.rag_system
+                model=os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"),
+                api_key=os.getenv("OPENAI_API_KEY")
             )
             components.status['financial_agent'] = ComponentStatus.HEALTHY
-            logger.info("✅ Financial Agent Team initialized")
+            logger.info("[OK] Financial Agent Team initialized")
             
         except Exception as e:
-            logger.error(f"❌ Financial Agent Team initialization failed: {e}")
+            logger.error(f"[ERROR] Financial Agent Team initialization failed: {e}")
             components.status['financial_agent'] = ComponentStatus.FAILED
             raise
 
@@ -164,19 +165,19 @@ async def lifespan(app: FastAPI):
                 'company_resolver': ComponentStatus.HEALTHY,
                 'document_processor': ComponentStatus.HEALTHY
             })
-            logger.info("✅ Support components initialized")
+            logger.info("[OK] Support components initialized")
         
         except Exception as e:
-            logger.error(f"⚠️ Some support components failed: {e}")
+            logger.error(f"[WARN] Some support components failed: {e}")
         
         # Initialize orchestrator
         try:
             components.orchestator = DueDiligenceOrchestrator()
             components.status['orchestator'] = ComponentStatus.HEALTHY
-            logger.info("✅ Analysis Orchestrator initialized")
+            logger.info("[OK] Analysis Orchestrator initialized")
         
         except Exception as e:
-            logger.error(f"⚠️ Orchestrator not available: {e}")
+            logger.error(f"[WARN] Orchestrator not available: {e}")
             components.status['orchestator'] = ComponentStatus.DEGRADED
         
         startup_success = True
@@ -204,10 +205,10 @@ async def lifespan(app: FastAPI):
         if cleanup_tasks:
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
-        logger.info("✅ API shutdown completed")
+        logger.info("[OK] API shutdown completed")
         
     except Exception as e:
-        logger.error(f"⚠️ Cleanup warning: {e}")
+        logger.error(f"[WARN] Cleanup warning: {e}")
 
 # Create FastAPI app
 app = FastAPI(
@@ -221,14 +222,21 @@ app = FastAPI(
 )
 
 # Prometheus metrics with duplicate protection
-_metrics_initialized = False
+def get_or_create_metric(metric_class, name, description, labelnames=None):
+    """Get existing metric or create new one to avoid duplicate registration errors"""
+    try:
+        if labelnames:
+            return metric_class(name, description, labelnames)
+        return metric_class(name, description)
+    except ValueError:
+        # Metric already exists, retrieve it from registry
+        return prometheus_client.REGISTRY._names_to_collectors.get(name)
 
-if not hasattr(app, 'metrics_initialized'):
-    REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
-    REQUEST_DURATION = Histogram('api_request_duration_seconds', 'API request duration')
-    ACTIVE_ANALYSES = Gauge('active_analyses', 'Number of active analyses')
-    SESSION_COUNT = Gauge('analysis_sessions_total', 'Total analysis sessions')
-    app.metrics_initialized = True
+# Initialize metrics safely (handles module reloads and multiple imports)
+REQUEST_COUNT = get_or_create_metric(Counter, 'api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
+REQUEST_DURATION = get_or_create_metric(Histogram, 'api_request_duration_seconds', 'API request duration')
+ACTIVE_ANALYSES = get_or_create_metric(Gauge, 'active_analyses', 'Number of active analyses')
+SESSION_COUNT = get_or_create_metric(Gauge, 'analysis_sessions_total', 'Total analysis sessions')
 
 # Add rate limiting to app state
 app.state.limiter = limiter
@@ -252,6 +260,8 @@ app.add_middleware(
 class AnalysisType(str, Enum):
     COMPREHENSIVE = "comprehensive"
     FINANCIAL = "financial"
+    LEGAL = "legal"
+    MARKET = "market"
     QUICK = "quick"
     CUSTOM = "custom"
 
@@ -264,7 +274,7 @@ class AnalysisRequest(BaseModel):
 
     @field_validator('company_ticker')
     def validate_ticker(cls, v):
-        if not v.isalphanum():
+        if not v.isalnum():
             raise ValueError('Ticker must be alphanumeric')
         return v.upper()
     
@@ -348,14 +358,16 @@ class AnalysisSession:
         return {
             "session_id": self.session_id,
             "company": self.company,
+            "analysis_type": self.analysis_type,
             "status": self.status,
             "progress": self.progress,
-            "created_at": self.created_at.isoformat(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "created_at": self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at,
+            "started_at": self.started_at.isoformat() if isinstance(self.started_at, datetime) else self.started_at,
+            "completed_at": self.completed_at.isoformat() if isinstance(self.completed_at, datetime) else self.completed_at,
             "result": self.result,
             "error": self.error,
-            "warnings": self.warnings
+            "warnings": self.warnings,
+            "progress_updates": self.progress_updates
         }
 
 class RedisSessionManager:
@@ -405,28 +417,28 @@ class RedisSessionManager:
     async def update_progress(self, session_id: str, progress: int, message: str) -> bool:
         """Update session progress atomically"""
         try:
-            # Use Redis transaction for atomic update
-            async with self.redis.pipeline(transaction=True) as pipe:
-                session_data = await pipe.get(f"{self.session_prefix}{session_id}").execute()
-                if not session_data[0]:
-                    return  False
-                
-                data_dict = json.loads(session_data)
-                data_dict['progress'] = progress
-                data_dict['progress_updates'].append({
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "progress": progress,
-                    "message": message
-                })
+            # Get current session data
+            session_data = await self.redis.get(f"{self.session_prefix}{session_id}")
+            if not session_data:
+                return False
+            
+            data_dict = json.loads(session_data)
+            data_dict['progress'] = progress
+            data_dict['progress_updates'].append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "progress": progress,
+                "message": message
+            })
 
-                await pipe.setex(
-                    f"{self.session_prefix}{session_id}",
-                    self.default_ttl,
-                    json.dumps(data_dict)
-                ).execute()
+            # Update in Redis
+            await self.redis.setex(
+                f"{self.session_prefix}{session_id}",
+                self.default_ttl,
+                json.dumps(data_dict)
+            )
 
-                logger.info(f"Updated progress for {session_id}: {progress}% - {message}")
-                return True
+            logger.info(f"Updated progress for {session_id}: {progress}% - {message}")
+            return True
             
         except Exception as e:
             logger.error(f"Progress update failed for {session_id}: {e}")
@@ -538,7 +550,7 @@ async def analysis_error_handler(request: Request, exc: AnalysisError):
     return JSONResponse(
         status_code=exc.status_code,
         content=ErrorResponse(
-            message=exc.message,
+            error=exc.message,
             session_id=exc.session_id,
             timestamp=datetime.now(timezone.utc).isoformat()
         ).model_dump()
@@ -582,17 +594,14 @@ async def process_analysis(session_id: str, company: str, analysis_type: str, ad
         ACTIVE_ANALYSES.inc()
         SESSION_COUNT.inc()
 
-        logger.info(f"Starting analysis for {company} (session: {session_id})")
-
-        # Get dependencies with proper error handling
-        financial_agent = await get_financial_agent()
-        rag_system = await get_rag_system()
+        logger.info(f"Starting {analysis_type} analysis for {company} (session: {session_id})")
 
         # Progress updates with Redis
         await session_mgr.update_progress(session_id, 10, "Initializing analysis...")
 
-        # Data validation
+        # Data validation (always ensure company data exists)
         await session_mgr.update_progress(session_id, 30, "Fetching company data...")
+        financial_agent = await get_financial_agent()
         data_available = await financial_agent.ensure_company_data(company)
 
         if not data_available:
@@ -602,12 +611,52 @@ async def process_analysis(session_id: str, company: str, analysis_type: str, ad
                 status_code=422
             )
         
-        # Core analysis
-        await session_mgr.update_progress(session_id, 60, "Running financial analysis...")
-        result = await financial_agent.analyze_company(
-            company_ticker=company,
-            additional_context=additional_context
-        )
+        # Core analysis - route based on analysis_type
+        await session_mgr.update_progress(session_id, 60, f"Running {analysis_type} analysis...")
+        
+        if analysis_type == "comprehensive":
+            # Use orchestrator for full analysis (financial + legal + market)
+            if components.orchestator:
+                result = await components.orchestator.execute_analysis(
+                    request_id=session_id,
+                    company_ticker=company,
+                    analysis_type=analysis_type,
+                    questions=[additional_context] if additional_context else []
+                )
+            else:
+                # Fallback to financial-only if orchestrator unavailable
+                logger.warning("Orchestrator unavailable, falling back to financial-only analysis")
+                result = await financial_agent.analyze_company(
+                    company_ticker=company,
+                    additional_context=additional_context
+                )
+        elif analysis_type == "financial":
+            # Financial analysis only
+            result = await financial_agent.analyze_company(
+                company_ticker=company,
+                additional_context=additional_context
+            )
+        elif analysis_type in ["legal", "market"]:
+            # Use orchestrator for legal/market (it will focus on the specified type)
+            if components.orchestator:
+                result = await components.orchestator.execute_analysis(
+                    request_id=session_id,
+                    company_ticker=company,
+                    analysis_type=analysis_type,
+                    questions=[additional_context] if additional_context else []
+                )
+            else:
+                raise AnalysisError(
+                    f"Orchestrator required for {analysis_type} analysis but not available",
+                    session_id=session_id,
+                    status_code=503
+                )
+        else:
+            # Quick, custom, or any other type - use financial as default
+            result = await financial_agent.analyze_company(
+                company_ticker=company,
+                additional_context=additional_context
+            )
 
         # Finalize
         await session_mgr.update_progress(session_id, 90, "Finalizing results...")
@@ -653,7 +702,12 @@ async def root():
 async def health_check():
     """Comprehensive health check endpoint"""
     component_statuses = {name: status.value for name, status in components.status.items()}
-    active_sessions = await session_manager.get_active_sessions_count()
+    
+    # Handle case when Redis/session_manager is unavailable
+    if session_manager is not None:
+        active_sessions = await session_manager.get_active_sessions_count()
+    else:
+        active_sessions = 0
 
     if all(status == ComponentStatus.HEALTHY for status in components.status.values()):
         overall_status = "healthy"
@@ -776,7 +830,7 @@ async def get_analysis_result(
             result=session.result,
             error=session.error,
             warnings=session.warnings,
-            timestamp=session.completed_at.isoformat() if session.completed_at else datetime.now(timezone.utc).isoformat(),
+            timestamp=session.completed_at if isinstance(session.completed_at, str) else (session.completed_at.isoformat() if session.completed_at else datetime.now(timezone.utc).isoformat()),
             processing_time=processing_time
         )
 

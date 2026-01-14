@@ -1,159 +1,176 @@
 # src/agents/memory_manager.py
 import uuid
+import logging
+import asyncio
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
-import logging
+
 from langgraph.store.memory import InMemoryStore
 from langchain_huggingface import HuggingFaceEmbeddings
 
 class MemoryManager:
+    """
+    Manages long-term memory and cross-analysis insights for the agent team.
+    Uses semantic search to find patterns across different companies and domains.
+    """
+    _instance = None
+
+    def __new__(cls):
+        # Singleton pattern to prevent reloading embeddings
+        if cls._instance is None:
+            cls._instance = super(MemoryManager, cls).__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        # Prevent re-initialization
+        if hasattr(self, 'store'):
+            return
+
         self.logger = logging.getLogger(__name__)
-        # Create a "smart storage" that understands text meaning
-        self.store = InMemoryStore(
-            index={
-                "embed": HuggingFaceEmbeddings(model = "sentence-transformers/all-MiniLM-L6-v2"),# This converts text to numbers (embeddings) for semantic search
-                "dims": 384,
-                "fields": ["insights", "company_comtext", "financial_patterns", "$"]
-                 # "$" means: embed ALL fields for search
-             }
-        )
-        # Create "folders" for different types of memories
-        self.NAMESPACES = {
-            "financial_patterns": "financial_insights",
-            "legal_risks": "legal_insights",            
-            "market_trends": "market_insights",         
-            "industry_benchmarks": "industry_data"
-        }
-
-    def store_financial_insight(self, user_id: str, company_ticker: str, insight: str,
-                                metrics: Dict[str, Any], pattern_type: str = "general") -> str:
-        # Step 1: Create unique ID for this memory
-        memory_id = str(uuid.uuid4())
-        # Step 2: Choose which "folder" to store this in
-        name_space = (user_id, self.NAMESPACES["financial_patterns"])# Example: ("user_123", "financial_insights")
-
-        # Step 3: Prepare the memory data
-        memory_data = {
-            "insight" : insight,
-            "company_ticker": company_ticker,
-            "pattern_type": pattern_type,
-            "metrics": metrics,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "financial_patterns": f" {insight} for {company_ticker} with metrics {metrics}"
-        }
-        # Step 4: Store in the "smart storage"
-        self.store.put(
-            name_space,
-            memory_id,
-            memory_data,
-            index = ["insight", "financial_patterns"]# Make these fields searchable
-        )
-
-        self.logger.info(f"Stored financial insight for {company_ticker}")
-        return memory_id
-    
-    def store_legal_risk(
-            self,
-            user_id: str,
-            company_ticker: str,
-            risk_type: str,
-            description: str,
-            severity: str,
-            context: str
-    ) -> str:
-         """Store legal risks and compliance patterns"""
-         memory_id = str(uuid.uuid4())
-         namespace = (user_id, self.NAMESPACES["legal_risks"])
-
-         memory_data = {
-             "risk_type": risk_type,
-             "description": description,
-             "severity": severity,
-             "company_ticker": company_ticker,
-             "context": context,
-             "timestamp": datetime.now(timezone.utc).isoformat(),
-             "legal_insights": f"{risk_type} risk for {company_ticker}: {description}"
-         }
-
-         self.store.put(
-             namespace,
-             memory_id,
-             memory_data,
-             index= ["risk_type","description","legal_insights"]
-         )
-         self.logger.info(f"Stored legal insight for {company_ticker}")
-         return memory_id
-    
-    def search_similar_companies(self, user_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Find companies with similar financial/risk profiles"""
-
-        # Choose which "memory folder" to search in
-        namespace = (user_id, self.NAMESPACES["financial_patterns"])
-        # Example: ("user_123", "financial_insights")
-
-        #Perform semantic search using natural language
-        results = self.store.search(
-            namespace,
-            query=query,
-            limit=limit
-        )
         
-        insights = []
-        for result in results:
-            insights.append(
-                {
+        try:
+            self.logger.info("Initializing Memory Manager (Embeddings)...")
+            # Initialize Semantic Store
+            self.store = InMemoryStore(
+                index={
+                    "embed": HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2"),
+                    "dims": 384,
+                    # Searchable fields
+                    "fields": ["insight", "risk_type", "description", "financial_patterns", "legal_insights"] 
+                }
+            )
+        except Exception as e:
+            self.logger.critical(f"Failed to initialize Memory Store: {e}")
+            raise
+
+        # Namespaces for organizing memory types
+        self.NAMESPACES = {
+            "financial": "financial_insights",
+            "legal": "legal_insights",            
+            "market": "market_insights",         
+            "industry": "industry_data"
+        }
+
+    async def store_financial_insight(self, user_id: str, company_ticker: str, insight: str, 
+                                      metrics: Dict[str, Any], pattern_type: str = "general") -> str:
+        """Stores a financial insight for future cross-referencing."""
+        try:
+            memory_id = str(uuid.uuid4())
+            # Tuple key for LangGraph InMemoryStore: (User, Namespace)
+            namespace = (user_id, self.NAMESPACES["financial"])
+
+            memory_data = {
+                "insight": insight,
+                "company_ticker": company_ticker,
+                "pattern_type": pattern_type,
+                "metrics": metrics,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                # Text field for semantic embedding
+                "financial_patterns": f"{company_ticker} {pattern_type}: {insight}. Metrics: {metrics}"
+            }
+
+            # Store operation (Blocking I/O wrapped for safety)
+            # In a real DB, this would be awaitable. InMemory is fast enough.
+            self.store.put(
+                namespace,
+                memory_id,
+                memory_data
+            )
+
+            self.logger.info(f"Stored financial insight for {company_ticker}")
+            return memory_id
+        
+        except Exception as e:
+            self.logger.error(f"Failed to store financial insight: {e}")
+            return ""
+
+    async def store_legal_risk(self, user_id: str, company_ticker: str, risk_type: str, 
+                               description: str, severity: str, context: str) -> str:
+        """Stores identified legal risks."""
+        try:
+            memory_id = str(uuid.uuid4())
+            namespace = (user_id, self.NAMESPACES["legal"])
+
+            memory_data = {
+                "risk_type": risk_type,
+                "description": description,
+                "severity": severity,
+                "company_ticker": company_ticker,
+                "context": context,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "legal_insights": f"{severity} {risk_type} risk for {company_ticker}: {description}"
+            }
+
+            self.store.put(
+                namespace,
+                memory_id,
+                memory_data
+            )
+            self.logger.info(f"Stored legal risk for {company_ticker}")
+            return memory_id
+
+        except Exception as e:
+            self.logger.error(f"Failed to store legal risk: {e}")
+            return ""
+
+    async def search_similar_companies(self, user_id: str, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Finds companies with similar financial/risk profiles based on the query."""
+        try:
+            namespace = (user_id, self.NAMESPACES["financial"])
+            
+            results = self.store.search(
+                namespace,
+                query=query,
+                limit=limit
+            )
+            
+            insights = []
+            for result in results:
+                insights.append({
                     "company": result.value.get("company_ticker"),
                     "insight": result.value.get("insight"),
                     "metrics": result.value.get("metrics", {}),
                     "pattern_type": result.value.get("pattern_type"),
                     "timestamp": result.value.get("timestamp"),
-                    "score": result.score if hasattr(result, 'score') else 1.0
-                }
+                    "score": getattr(result, 'score', 0.0)
+                })
+            return insights
+
+        except Exception as e:
+            self.logger.error(f"Search failed: {e}")
+            return []
+
+    async def search_industry_risks(self, user_id: str, query: str, limit: int = 3) -> List[Dict[str, Any]]:
+        """Searches for past legal/market risks relevant to the current context."""
+        try:
+            namespace = (user_id, self.NAMESPACES["legal"])
+            
+            results = self.store.search(
+                namespace,
+                query=query,
+                limit=limit
             )
-        return insights
 
-    def search_industry_risks(
-            self,
-            user_id: str,
-            industry_context: str,
-            risk_type: Optional[str] = None,
-            limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Search for similar legal/market risks"""
-        namespace = (user_id, self.NAMESPACES["legal_risks"])
-        query = f" {risk_type} risks for {industry_context}" if risk_type else industry_context
-
-        results = self.store.search(
-            namespace,
-            query=query,
-            limit=limit
-        )
-
-        risks = []
-        for result in results:
-            risks.append(
-                {
+            risks = []
+            for result in results:
+                risks.append({
                     "company": result.value.get("company_ticker"),
                     "risk_type": result.value.get("risk_type"),
                     "description": result.value.get("description"),
                     "severity": result.value.get("severity"),
-                    "context": result.value.get("context"),
                     "timestamp": result.value.get("timestamp")
-                    }
-            )
+                })
+            return risks
 
-        return risks
-    
-    def get_cross_analysis_insights(
-            self,
-            user_id: str,
-            current_company: str,
-            analysis_type: str
-    ) -> Dict[str, Any]:
-        """Get relevant insights from previous analyses"""
+        except Exception as e:
+            self.logger.error(f"Industry risk search failed: {e}")
+            return []
 
-        # Create empty container for insights
+    async def get_cross_analysis_insights(self, user_id: str, company: str, analysis_type: str = "general") -> Dict[str, Any]:
+        """
+        Aggregates insights from previous analyses to provide context for the current company.
+        Example: "When analyzing Tesla, look at how Rivian handled supply chain issues (from memory)."
+        """
         insights = {
             "financial_patterns": [],
             "legal_risks": [],
@@ -161,65 +178,51 @@ class MemoryManager:
         }
         
         try:
-            # Find similar financial patterns
-            financial_query = f"financial patterns ratios performance {current_company}"
-            insights["financial_patterns"] = self.search_similar_companies(
-                user_id,
-                financial_query,
-                limit=3
-            )# Example result: [
-            #   {"company": "AAPL", "insight": "High R&D = Growth", ...},
-            #   {"company": "NIO", "insight": "EV companies need capex", ...}
-            # ]
+            # 1. Find Similar Financial Patterns
+            # Query: "financial patterns similar to {company}"
+            fin_query = f"financial patterns performance metrics like {company}"
+            insights["financial_patterns"] = await self.search_similar_companies(user_id, fin_query)
 
-            # Find relevant legal risks
-            legal_query = f"legal complaince risks {current_company}"
-            insights["legal_risks"] = self.search_industry_risks(
-                user_id,
-                legal_query,
-                limit=3
-            )# Example result: [
-            #   {"company": "F", "risk_type": "regulatory", "description": "Emissions  standards", ...},
-            #   {"company": "GM", "risk_type": "safety", "description": "Recall issues", ...}
-            # ]
-             
+            # 2. Find Relevant Legal Risks
+            # Query: "legal risks for {company} industry"
+            legal_query = f"legal regulatory risks {company} industry"
+            insights["legal_risks"] = await self.search_industry_risks(user_id, legal_query)
 
-            # Find companies with similar profiles
-            similarity_query =f"companies similar to {current_company} financial metrics"
-            # Query: "companies similar to TSLA financial metrics"
-            insights["similar_companies"] = self.search_similar_companies(
-                user_id,
-                similarity_query,
-                limit=3
-            )# Example result: [
-            #   {"company": "NIO", "insight": "EV manufacturer growth patterns", ...},
-            #   {"company": "RIVN", "insight": "Electric vehicle market entry", ...}
-            # ]
+            # 3. Find Strategic Peers (General similarity)
+            peer_query = f"companies strategically similar to {company}"
+            insights["similar_companies"] = await self.search_similar_companies(user_id, peer_query)
 
         except Exception as e:
-            self.logger.warning(f"Cross-analysis insights failed: {e}")
+            self.logger.warning(f"Cross-analysis insight generation partial fail: {e}")
 
-        # Return all gathered insights
-        return insights # Example return: {
-        #   "financial_patterns": [AAPL insights, NIO insights],
-        #   "legal_risks": [F risks, GM risks], 
-        #   "similar_companies": [NIO profile, RIVN profile]
-        # }
+        return insights
+
+# --- Testing Block ---
+if __name__ == "__main__":
+    async def main():
+        logging.basicConfig(level=logging.INFO)
+        mem = MemoryManager()
         
+        user = "test_user"
+        
+        # 1. Store some dummy data
+        print("Storing Insight...")
+        await mem.store_financial_insight(
+            user, "TSLA", "High volatility due to regulatory credits", 
+            {"volatility": "high", "beta": 2.1}, "risk_pattern"
+        )
+        
+        # 2. Store some legal data
+        await mem.store_legal_risk(
+            user, "TSLA", "Regulatory", "SEC investigation into disclosures", "High", "10-K Filing"
+        )
 
+        # 3. Test Retrieval
+        print("\nRetrieving Insights for similar company (RIVN)...")
+        insights = await mem.get_cross_analysis_insights(user, "RIVN")
+        
+        print(f"Financial Patterns Found: {len(insights['financial_patterns'])}")
+        for item in insights['financial_patterns']:
+            print(f" - Found match from {item['company']}: {item['insight']}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
-    
+    asyncio.run(main())
